@@ -27,6 +27,13 @@ jobs:
       - name: Build graphtron-demo
         working-directory: crates/graphtron-demo
         run: dx build --release --platform web --base-path /graphtron/
+      # GitHub Pages serves static files only; client-side routing needs a
+      # physical rrdtool/index.html for /graphtron/rrdtool to resolve.
+      - name: Copy index.html to rrdtool/ for static routing
+        run: |
+          mkdir -p target/dx/graphtron-demo/release/web/public/rrdtool
+          cp target/dx/graphtron-demo/release/web/public/index.html \
+             target/dx/graphtron-demo/release/web/public/rrdtool/index.html
       - uses: actions/upload-pages-artifact@v4
         with:
           path: target/dx/graphtron-demo/release/web/public
