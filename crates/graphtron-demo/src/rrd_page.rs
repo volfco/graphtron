@@ -212,7 +212,7 @@ pub fn RrdPage() -> Element {
     rsx! {
         style { {CSS} }
         main { class: if dark() { "rrd-page rrd-dark" } else { "rrd-page" },
-            nav { a { href: "/", "← Graphtron chart gallery" } }
+            nav { a { href: "..", "← Graphtron chart gallery" } }
             h1 { "RRDtool, in the browser" }
             button { r#type: "button", aria_pressed: dark().to_string(), onclick: move |_| { let next = !dark(); dark.set(next); }, "Dark mode" }
             p { "Dark mode takes its black plotting paper, white labels and blue/cyan spectrum from the ", a { href: "https://oss.oetiker.ch/rrdtool/gallery/charles.png", "Charles RRDtool gallery graph" }, "." }

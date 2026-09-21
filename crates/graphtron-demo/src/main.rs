@@ -56,7 +56,7 @@ fn App() -> Element {
             location
                 .and_then(|l| js_sys::Reflect::get(&l, &"pathname".into()).ok())
                 .and_then(|p| p.as_string())
-                .is_some_and(|p| p.trim_end_matches('/') == "/rrdtool")
+                .is_some_and(|p| p.trim_end_matches('/').ends_with("/rrdtool"))
         }
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -72,7 +72,7 @@ fn App() -> Element {
         style { {STYLE} }
         div { class: "wrap",
             h1 { "graphtron chart gallery" }
-            p { a { href: "/rrdtool", style: "color: #8ac7ff", "RRDtool style — static and interactive examples →" } }
+            p { a { href: "rrdtool", style: "color: #8ac7ff", "RRDtool style — static and interactive examples →" } }
             p { class: "sub",
                 "Pure-Rust Canvas2D renderer, embedded via the <GraphtronChart> component. "
                 "Shared cursor + zoom across the first row. \u{00B7} ",
