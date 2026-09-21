@@ -1,0 +1,25 @@
+[package]
+name = "graphtron-dioxus"
+version = "0.1.0"
+authors = ["colum <git@volf.co>"]
+edition = "2024"
+publish = false
+description = "Reusable Dioxus chart component wrapping the graphtron renderer"
+
+[dependencies]
+dioxus = { version = "0.7.3" }
+graphtron = { workspace = true, features = ["web"] }
+web-sys = { version = "0.3", features = [
+    "Window",
+    "Element",
+    "EventTarget",
+    "PointerEvent",
+    "HtmlCanvasElement",
+    "CanvasRenderingContext2d",
+] }
+js-sys = "0.3"
+wasm-bindgen = "0.2"
+
+[features]
+default = ["web"]
+web = ["dioxus/web"]

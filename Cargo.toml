@@ -1,0 +1,20 @@
+[workspace]
+resolver = "3"
+members = [
+  "crates/graphtron",
+  "crates/graphtron-dioxus",
+  "crates/graphtron-demo",
+]
+
+# graphtron-demo is a Dioxus web app; opt-level 1 keeps debug wasm builds
+# from being unusably slow without paying for a full release compile.
+[profile.wasm-dev]
+inherits = "dev"
+opt-level = 1
+
+[workspace.dependencies]
+graphtron = { path = "crates/graphtron" }
+# default-features=false: graphtron-dioxus's `web` feature only adds dioxus/web,
+# which a consuming app already enables itself. Leaving it on would force
+# dioxus/web into host builds that only want the component types.
+graphtron-dioxus = { path = "crates/graphtron-dioxus", default-features = false }

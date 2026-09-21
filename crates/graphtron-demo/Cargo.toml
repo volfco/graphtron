@@ -1,0 +1,17 @@
+[package]
+name = "graphtron-demo"
+version = "0.1.0"
+authors = ["colum <git@volf.co>"]
+edition = "2024"
+publish = false
+description = "Standalone Dioxus gallery demonstrating the graphtron chart renderer"
+
+[dependencies]
+dioxus = { version = "0.7.3" }
+graphtron = { workspace = true, features = ["web"] }
+graphtron-dioxus = { workspace = true }
+js-sys = "0.3"
+
+[features]
+default = ["web"]
+web = ["dioxus/web"]
