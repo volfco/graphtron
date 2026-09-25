@@ -199,12 +199,12 @@ impl ChartLayout {
 /// maximum, which is the readable default for latency and throughput data.
 fn positive_log_bounds(y_min: f64, y_max: f64) -> (f64, f64) {
     let hi = if y_max.is_finite() && y_max > 0.0 {
-        y_max
+        y_max.max(LOG_EPSILON * 10.0)
     } else {
         1.0
     };
     let lo = if y_min.is_finite() && y_min > 0.0 && y_min < hi {
-        y_min
+        y_min.max(LOG_EPSILON)
     } else {
         (hi / 1000.0).max(LOG_EPSILON)
     };
@@ -228,6 +228,21 @@ fn fit_margins(start: f64, end: f64, extent: f64) -> (f64, f64) {
     (start, end)
 }
 
+fn finite_add(a: f64, b: f64) -> f64 {
+    let value = a + b;
+    if value.is_finite() {
+        value
+    } else if a.is_sign_positive() {
+        f64::MAX
+    } else {
+        -f64::MAX
+    }
+}
+
+fn finite_sub(a: f64, b: f64) -> f64 {
+    finite_add(a, -b)
+}
+
 fn ordered_domain(a: f64, b: f64) -> (f64, f64) {
     let mut lo = finite_or(a, 0.0);
     let mut hi = finite_or(b, 1.0);
@@ -236,7 +251,7 @@ fn ordered_domain(a: f64, b: f64) -> (f64, f64) {
     }
     if lo == hi {
         let pad = if lo == 0.0 { 1.0 } else { lo.abs() * 0.1 };
-        (lo - pad, hi + pad)
+        (finite_sub(lo, pad), finite_add(hi, pad))
     } else {
         (lo, hi)
     }
@@ -296,11 +311,16 @@ pub(crate) fn finish_domain(
             min = 0.0;
         }
     } else {
-        let pad = (max - min) * 0.05;
+        let span = max - min;
+        let pad = if span.is_finite() {
+            span * 0.05
+        } else {
+            (max.abs() * 0.05 + min.abs() * 0.05).min(f64::MAX)
+        };
         if !zero_anchored || min != 0.0 {
-            min -= pad;
+            min = finite_sub(min, pad);
         }
-        max += pad;
+        max = finite_add(max, pad);
         if zero_anchored && min < 0.0 && non_negative {
             min = 0.0;
         }
@@ -1186,6 +1206,34 @@ mod tests {
         assert!(layout.y_scale.d0 < layout.y_scale.d1);
         assert!(layout.ts_at(layout.plot.x).is_finite());
         assert!(layout.ts_at(layout.plot.x + layout.plot.w).is_finite());
+    }
+
+    #[test]
+    fn extreme_linear_domains_remain_mappable() {
+        let scale = LinearScale::new(-f64::MAX, f64::MAX, 0.0, 100.0);
+        assert!(scale.to_px(0.0).is_finite());
+        assert!(scale.from_px(50.0).is_finite());
+        let layout = ChartLayout::compute(100.0, 100.0, -f64::MAX, f64::MAX, -f64::MAX, f64::MAX);
+        assert!(layout.ts_at(50.0).is_finite());
+    }
+
+    #[test]
+    fn subnormal_log_domain_is_clamped() {
+        let layout = ChartLayout::compute_scaled(
+            100.0,
+            100.0,
+            0.0,
+            1.0,
+            f64::from_bits(1),
+            f64::from_bits(1),
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            ScaleKind::Log,
+        );
+        assert!(layout.y_domain().0.is_finite());
+        assert!(layout.y_domain().0 > 0.0);
     }
 
     #[test]

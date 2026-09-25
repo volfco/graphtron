@@ -135,12 +135,20 @@ pub(crate) fn validate_chart_data(data: &ChartData) -> Vec<DataIssue> {
             for (si, s) in series.iter().enumerate() {
                 check_lengths(&mut issues, si, "xs", s.xs.len(), "ys", s.ys.len());
                 check_xs(&mut issues, si, &s.xs);
+                for (index, value) in s.ys.iter().copied().enumerate() {
+                    if value.is_infinite() {
+                        issues.push(DataIssue {
+                            series: si,
+                            index: Some(index),
+                            kind: DataIssueKind::NonFiniteValue { field: "y" },
+                        });
+                    }
+                }
             }
         }
         ChartData::Ohlc(series) => {
             for (si, s) in series.iter().enumerate() {
-                let xs: Vec<f64> = s.ticks.iter().map(|tick| tick.ts).collect();
-                check_xs(&mut issues, si, &xs);
+                check_x_values(&mut issues, si, s.ticks.iter().map(|tick| tick.ts));
                 for (i, tick) in s.ticks.iter().enumerate() {
                     for (field, value) in [
                         ("open", tick.open),
@@ -306,7 +314,12 @@ fn check_lengths(
 }
 
 fn check_xs(issues: &mut Vec<DataIssue>, series: usize, xs: &[f64]) {
-    for (i, x) in xs.iter().enumerate() {
+    check_x_values(issues, series, xs.iter().copied());
+}
+
+fn check_x_values(issues: &mut Vec<DataIssue>, series: usize, xs: impl IntoIterator<Item = f64>) {
+    let mut previous: Option<f64> = None;
+    for (i, x) in xs.into_iter().enumerate() {
         if !x.is_finite() {
             issues.push(DataIssue {
                 series,
@@ -314,12 +327,19 @@ fn check_xs(issues: &mut Vec<DataIssue>, series: usize, xs: &[f64]) {
                 kind: DataIssueKind::NonFiniteX,
             });
         }
-        if i > 0 && x.is_finite() && xs[i - 1].is_finite() && *x < xs[i - 1] {
+        if let Some(previous) = previous
+            && x.is_finite()
+            && previous.is_finite()
+            && x < previous
+        {
             issues.push(DataIssue {
                 series,
                 index: Some(i),
                 kind: DataIssueKind::DecreasingX,
             });
+        }
+        if x.is_finite() {
+            previous = Some(x);
         }
     }
 }
@@ -389,12 +409,30 @@ pub(crate) fn validate_chart_data_for_spec(
         }
         ChartData::Histogram(series) => {
             for (si, s) in series.iter().enumerate() {
-                report(si, &mut s.plot_counts().into_iter().enumerate());
+                let mut total = 0.0;
+                report(
+                    si,
+                    &mut s.counts.iter().enumerate().map(|(i, count)| {
+                        if count.is_finite() {
+                            total = crate::series::finite_add(total, *count);
+                        }
+                        (i, total)
+                    }),
+                );
             }
         }
         ChartData::Band(series) => {
             for (si, s) in series.iter().enumerate() {
-                report(si, &mut s.lower.iter().copied().enumerate());
+                report(
+                    si,
+                    &mut s
+                        .lower
+                        .iter()
+                        .copied()
+                        .chain(s.center.iter().copied())
+                        .chain(s.upper.iter().copied())
+                        .enumerate(),
+                );
             }
         }
         _ => {
@@ -458,6 +496,36 @@ mod tests {
                 .any(|issue| issue.kind == DataIssueKind::NonIncreasingBucket)
         );
     }
+    #[test]
+    fn reports_infinite_point_values_and_all_log_band_components() {
+        let points = ChartData::Lines(vec![SeriesData {
+            name: "points".into(),
+            xs: vec![0.0],
+            ys: vec![f64::INFINITY],
+            color: None,
+        }]);
+        assert!(matches!(
+            points.validate().unwrap_err()[0].kind,
+            DataIssueKind::NonFiniteValue { field: "y" }
+        ));
+
+        let band = ChartData::Band(vec![crate::series::BandSeries {
+            name: "band".into(),
+            xs: vec![0.0],
+            center: vec![1.0],
+            lower: vec![2.0],
+            upper: vec![0.0],
+            color: None,
+        }]);
+        let issues = band
+            .validate_with(&crate::spec::ChartSpec::line(crate::units::Unit::None).with_log_y())
+            .unwrap_err();
+        assert!(issues.iter().any(|issue| matches!(
+            issue.kind,
+            DataIssueKind::NonPositiveOnLogAxis { count: 1, .. }
+        )));
+    }
+
     #[test]
     fn log_axis_validation_counts_values_it_will_gap() {
         use crate::series::SeriesData;

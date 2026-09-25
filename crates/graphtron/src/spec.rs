@@ -151,7 +151,7 @@ impl ChartData {
                     .counts
                     .iter()
                     .take(series.buckets.len().saturating_sub(1))
-                    .all(|count| !count.is_finite())
+                    .all(|count| !count.is_finite() || *count == 0.0)
             }),
             Self::HBar(s) => s.iter().all(|series| {
                 series
@@ -694,7 +694,7 @@ impl PointMarkers {
         match self {
             Self::Never => false,
             Self::Always => true,
-            Self::Auto => drawn > 1 && drawn <= Self::AUTO_MAX_POINTS,
+            Self::Auto => drawn > 0 && drawn <= Self::AUTO_MAX_POINTS,
         }
     }
 }
@@ -1004,12 +1004,24 @@ mod tests {
     }
 
     #[test]
+    fn zero_only_histogram_is_empty() {
+        let data = ChartData::Histogram(vec![HistogramSeries {
+            name: "empty".into(),
+            buckets: vec![0.0, 1.0],
+            counts: vec![0.0],
+            color: None,
+            cumulative: false,
+        }]);
+        assert!(data.is_empty());
+    }
+
+    #[test]
     fn auto_point_markers_only_fire_while_a_series_is_sparse() {
+        assert!(PointMarkers::Auto.enabled_for(1));
         assert!(PointMarkers::Auto.enabled_for(12));
         assert!(PointMarkers::Auto.enabled_for(PointMarkers::AUTO_MAX_POINTS));
         assert!(!PointMarkers::Auto.enabled_for(PointMarkers::AUTO_MAX_POINTS + 1));
-        // One point has no line to disambiguate, and zero has nothing to mark.
-        assert!(!PointMarkers::Auto.enabled_for(1));
+        // Zero has nothing to mark.
         assert!(!PointMarkers::Never.enabled_for(3));
         assert!(PointMarkers::Always.enabled_for(100_000));
     }

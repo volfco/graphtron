@@ -159,22 +159,38 @@ pub fn lttb(xs: &[f64], ys: &[f64], threshold: usize) -> Vec<(f64, f64)> {
         .iter()
         .map(|(start, end)| (end - start).min(2))
         .collect();
-    let mut remaining = threshold - minimum_points - separators;
-    while remaining > 0 {
-        let Some((index, _)) = runs
-            .iter()
-            .enumerate()
-            .filter(|(index, (start, end))| budgets[*index] < end - start)
-            .max_by(|(ai, (a0, a1)), (bi, (b0, b1))| {
-                let a_remaining = (a1 - a0) - budgets[*ai];
-                let b_remaining = (b1 - b0) - budgets[*bi];
-                a_remaining.cmp(&b_remaining)
-            })
-        else {
-            break;
+    let remaining = threshold - minimum_points - separators;
+    let residual: Vec<usize> = runs
+        .iter()
+        .enumerate()
+        .map(|(index, (start, end))| (end - start) - budgets[index])
+        .collect();
+    let total_residual: usize = residual.iter().sum();
+    let mut cumulative = 0usize;
+    let mut allocated = 0usize;
+    for (index, capacity) in residual.into_iter().enumerate() {
+        cumulative += capacity;
+        let share = if total_residual == 0 {
+            0
+        } else {
+            ((remaining as u128 * cumulative as u128) / total_residual as u128) as usize
         };
-        budgets[index] += 1;
-        remaining -= 1;
+        let extra = share.saturating_sub(allocated).min(capacity);
+        budgets[index] += extra;
+        allocated += extra;
+    }
+    // Rounding the proportional shares can leave a few points unused. One
+    // linear pass over the runs is enough to hand them out without another
+    // full-run scan for every point.
+    for index in 0..budgets.len() {
+        if allocated >= remaining {
+            break;
+        }
+        let (start, end) = runs[index];
+        if budgets[index] < end - start {
+            budgets[index] += 1;
+            allocated += 1;
+        }
     }
 
     let mut result = Vec::with_capacity(threshold);

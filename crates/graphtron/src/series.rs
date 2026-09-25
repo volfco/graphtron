@@ -103,6 +103,20 @@ pub fn palette_color(explicit: Option<u32>, index: usize) -> u32 {
     explicit.unwrap_or(PALETTE[index % PALETTE.len()])
 }
 
+/// Add finite values without turning an overflowing histogram into infinity.
+pub(crate) fn finite_add(a: f64, b: f64) -> f64 {
+    let sum = a + b;
+    if sum.is_finite() {
+        sum
+    } else if a.is_sign_positive() && b.is_sign_positive() {
+        f64::MAX
+    } else if a.is_sign_negative() && b.is_sign_negative() {
+        -f64::MAX
+    } else {
+        sum
+    }
+}
+
 pub fn series_color(series: &SeriesData, index: usize) -> u32 {
     palette_color(series.color, index)
 }
@@ -169,7 +183,7 @@ pub fn ohlc_series_color(series: &OhlcSeriesData, index: usize) -> u32 {
 }
 
 pub fn css_color(rgb: u32) -> String {
-    format!("#{rgb:06x}")
+    format!("#{:06x}", rgb & 0x00ff_ffff)
 }
 
 pub fn css_color_alpha(rgb: u32, alpha: f64) -> String {
@@ -380,7 +394,7 @@ impl HistogramSeries {
                 .iter()
                 .map(|&c| {
                     if c.is_finite() {
-                        acc += c;
+                        acc = finite_add(acc, c);
                     }
                     acc
                 })
@@ -400,7 +414,7 @@ impl HistogramSeries {
                     .iter()
                     .copied()
                     .filter(|count| count.is_finite())
-                    .sum(),
+                    .fold(0.0, finite_add),
             )
         } else {
             Some(value)
@@ -571,6 +585,25 @@ mod tests {
             cumulative: false,
         };
         assert_eq!(s.plot_counts(), vec![3.0, 1.0, 2.0]);
+    }
+
+    #[test]
+    fn cumulative_counts_saturate_instead_of_becoming_infinite() {
+        let series = HistogramSeries {
+            name: "large".into(),
+            buckets: vec![0.0, 1.0, 2.0],
+            counts: vec![f64::MAX, f64::MAX],
+            color: None,
+            cumulative: true,
+        };
+        let plotted = series.plot_counts();
+        assert!(plotted.iter().all(|value| value.is_finite()));
+        assert_eq!(plotted[1], f64::MAX);
+    }
+
+    #[test]
+    fn css_color_masks_oversized_literals() {
+        assert_eq!(css_color(0x1234_5678), "#345678");
     }
 
     #[test]

@@ -195,6 +195,13 @@ mod web {
         top_first: bool,
     ) {
         let ctx = &surface.ctx;
+        let available_w = (surface.css_w - 4.0).min(layout.plot.w - 4.0).max(1.0);
+        let available_h = (surface.css_h - 4.0).min(layout.plot.h - 4.0).max(1.0);
+        // A tooltip that cannot contain its header and one row is not useful;
+        // returning is preferable to painting text outside its background.
+        if available_h < TOOLTIP_HEADER_H + TOOLTIP_LINE_H + TOOLTIP_PAD * 2.0 {
+            return;
+        }
         let mut indices: Vec<usize> = (0..info.values.len()).collect();
         if top_first {
             indices.sort_by(|&a, &b| {
@@ -254,8 +261,8 @@ mod web {
             // The tooltip is clamped to the plot, so its dimensions must fit
             // the plot as well as the backing canvas. Using canvas width alone
             // lets a narrow left axis gutter force values past the right edge.
-            (surface.css_w - 4.0).min(layout.plot.w - 4.0).max(1.0),
-            (surface.css_h - 4.0).min(layout.plot.h - 4.0).max(1.0),
+            available_w,
+            available_h,
         );
 
         let plot = layout.plot;
@@ -319,7 +326,8 @@ mod web {
             .header
             .clone()
             .unwrap_or_else(|| format_ts_full(info.ts as i64));
-        let _ = ctx.fill_text(&ts_text, tx + TOOLTIP_PAD, y);
+        let header = ellipsize(ctx, &ts_text, (metrics.w - TOOLTIP_PAD * 2.0).max(0.0));
+        let _ = ctx.fill_text(&header, tx + TOOLTIP_PAD, y);
         y += TOOLTIP_HEADER_H;
 
         for index in visible {

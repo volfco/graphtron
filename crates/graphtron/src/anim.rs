@@ -30,8 +30,9 @@ impl PartialEq for Animation {
             && self.to == other.to
             && self.start_ms == other.start_ms
             && self.duration_ms == other.duration_ms
-            // Compare easing by evaluating at a sample point.
-            && (self.easing)(0.5) == (other.easing)(0.5)
+            && [0.0, 0.25, 0.5, 0.75, 1.0]
+                .iter()
+                .all(|t| (self.easing)(*t) == (other.easing)(*t))
     }
 }
 
@@ -42,7 +43,7 @@ impl Animation {
             from,
             to,
             start_ms,
-            duration_ms,
+            duration_ms: valid_duration(duration_ms),
             easing: easing::ease_out_cubic,
         }
     }
@@ -59,7 +60,7 @@ impl Animation {
             from,
             to,
             start_ms,
-            duration_ms,
+            duration_ms: valid_duration(duration_ms),
             easing,
         }
     }
@@ -67,20 +68,44 @@ impl Animation {
     /// Interpolated value at the given time. Returns `from` before start,
     /// `to` after end, and the eased interpolation in between.
     pub fn value_at(&self, now_ms: f64) -> f64 {
-        let elapsed = now_ms - self.start_ms;
-        let t = (elapsed / self.duration_ms).clamp(0.0, 1.0);
+        if !self.duration_ms.is_finite() || self.duration_ms <= 0.0 {
+            return if now_ms < self.start_ms {
+                self.from
+            } else {
+                self.to
+            };
+        }
+        if now_ms < self.start_ms {
+            return self.from;
+        }
+        let t = ((now_ms - self.start_ms) / self.duration_ms).clamp(0.0, 1.0);
         let eased = (self.easing)(t);
         self.from + (self.to - self.from) * eased
     }
 
     /// Whether the animation has completed.
     pub fn is_done(&self, now_ms: f64) -> bool {
-        now_ms >= self.start_ms + self.duration_ms
+        if !self.duration_ms.is_finite() || self.duration_ms <= 0.0 {
+            now_ms >= self.start_ms
+        } else {
+            now_ms >= self.start_ms + self.duration_ms
+        }
     }
 
     /// Progress in [0, 1] (before start = 0, after end = 1).
     pub fn progress(&self, now_ms: f64) -> f64 {
+        if !self.duration_ms.is_finite() || self.duration_ms <= 0.0 {
+            return if now_ms < self.start_ms { 0.0 } else { 1.0 };
+        }
         ((now_ms - self.start_ms) / self.duration_ms).clamp(0.0, 1.0)
+    }
+}
+
+fn valid_duration(duration_ms: f64) -> f64 {
+    if duration_ms.is_finite() {
+        duration_ms.max(0.0)
+    } else {
+        0.0
     }
 }
 
@@ -122,6 +147,29 @@ mod tests {
         // Midpoint with ease_out_cubic should be > 50 (front-loaded)
         let mid = a.value_at(500.0);
         assert!(mid > 50.0 && mid < 100.0);
+    }
+
+    #[test]
+    fn non_positive_duration_snapshots_to_the_target() {
+        let animation = Animation::new(1.0, 2.0, 10.0, 0.0);
+        assert_eq!(animation.duration_ms, 0.0);
+        assert_eq!(animation.value_at(10.0), 2.0);
+        assert!(animation.is_done(10.0));
+        assert_eq!(animation.progress(10.0), 1.0);
+        assert!(Animation::new(1.0, 2.0, 0.0, -1.0).is_done(0.0));
+    }
+
+    #[test]
+    fn easing_equality_compares_more_than_the_midpoint() {
+        fn quarter(t: f64) -> f64 {
+            t * t
+        }
+        fn different_midpoint(t: f64) -> f64 {
+            if t == 0.5 { 0.5 } else { quarter(t) }
+        }
+        let a = Animation::with_easing(0.0, 1.0, 0.0, 1.0, quarter);
+        let b = Animation::with_easing(0.0, 1.0, 0.0, 1.0, different_midpoint);
+        assert_ne!(a, b);
     }
 
     #[test]

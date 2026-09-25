@@ -62,14 +62,28 @@ impl LinearScale {
         if self.d1 == self.d0 {
             return (self.r0 + self.r1) / 2.0;
         }
-        self.r0 + (v - self.d0) / (self.d1 - self.d0) * (self.r1 - self.r0)
+        let t = if (self.d1 - self.d0).is_finite() {
+            (v - self.d0) / (self.d1 - self.d0)
+        } else {
+            // A domain spanning -MAX..MAX has an unrepresentable subtraction.
+            // Interpolate scaled endpoints instead of manufacturing NaN.
+            let scale = self.d0.abs().max(self.d1.abs()).max(1.0);
+            (v / scale - self.d0 / scale) / (self.d1 / scale - self.d0 / scale)
+        };
+        self.r0 + t * (self.r1 - self.r0)
     }
 
     pub fn from_px(&self, px: f64) -> f64 {
         if self.r1 == self.r0 {
             return self.d0;
         }
-        self.d0 + (px - self.r0) / (self.r1 - self.r0) * (self.d1 - self.d0)
+        let t = (px - self.r0) / (self.r1 - self.r0);
+        if (self.d1 - self.d0).is_finite() {
+            self.d0 + t * (self.d1 - self.d0)
+        } else {
+            let scale = self.d0.abs().max(self.d1.abs()).max(1.0);
+            (self.d0 / scale) * (1.0 - t) + (self.d1 / scale) * t * scale
+        }
     }
 
     /// Expand the domain to the enclosing "nice" tick boundaries.

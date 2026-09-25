@@ -34,31 +34,46 @@ impl Summary {
         let mut count = 0usize;
         let mut min = f64::INFINITY;
         let mut max = f64::NEG_INFINITY;
-        let mut mean = 0.0f64;
-        let mut m2 = 0.0f64;
-        let mut sum = 0.0f64;
+        // Keep the running mean and M2 in a scaled coordinate system. The
+        // usual Welford update still forms `delta²`, which overflows for
+        // otherwise perfectly valid values near f64::MAX.
+        let mut scale = 0.0f64;
+        let mut scaled_mean = 0.0f64;
+        let mut scaled_m2 = 0.0f64;
         for value in values {
             if !value.is_finite() {
                 continue;
             }
             count += 1;
-            sum += value;
             min = min.min(value);
             max = max.max(value);
-            let delta = value - mean;
-            mean += delta / count as f64;
-            m2 += delta * (value - mean);
+            let next_scale = scale.max(value.abs());
+            if next_scale > 0.0 {
+                let normalized = value / next_scale;
+                if scale != next_scale {
+                    let factor = scale / next_scale;
+                    scaled_mean *= factor;
+                    scaled_m2 *= factor * factor;
+                    scale = next_scale;
+                }
+                let delta = normalized - scaled_mean;
+                scaled_mean += delta / count as f64;
+                scaled_m2 += delta * (normalized - scaled_mean);
+            }
         }
         if count == 0 {
             return None;
         }
+        let mean = scaled_mean * scale;
+        let sum = (mean * count as f64).clamp(-f64::MAX, f64::MAX);
+        let stddev = (scaled_m2 / count as f64).sqrt() * scale;
         Some(Self {
             count,
             min,
             max,
             mean,
             sum,
-            stddev: (m2 / count as f64).sqrt(),
+            stddev,
         })
     }
 
@@ -121,7 +136,10 @@ pub fn simple_moving_average(values: &[f64], window: usize) -> Vec<f64> {
     // Incremental addition and subtraction drifts by roughly n × eps of the
     // running magnitude — around 1e-10 relative at a million points, far
     // below one pixel of a drawn curve.
+    // Keep the window sum scaled by its largest magnitude. An unscaled
+    // running sum overflows for perfectly valid telemetry near f64::MAX.
     let mut sum = 0.0f64;
+    let mut scale = 0.0f64;
     let mut count = 0usize;
     let mut start = 0usize;
     let mut end = 0usize;
@@ -130,14 +148,24 @@ pub fn simple_moving_average(values: &[f64], window: usize) -> Vec<f64> {
         let want_end = (index + half + 1).min(values.len());
         while end < want_end {
             if values[end].is_finite() {
-                sum += values[end];
+                let value = values[end];
+                let next_scale = scale.max(value.abs());
+                if next_scale > 0.0 {
+                    if scale != next_scale {
+                        sum *= scale / next_scale;
+                        scale = next_scale;
+                    }
+                    sum += value / scale;
+                }
                 count += 1;
             }
             end += 1;
         }
         while start < want_start {
             if values[start].is_finite() {
-                sum -= values[start];
+                if scale > 0.0 {
+                    sum -= values[start] / scale;
+                }
                 count -= 1;
             }
             start += 1;
@@ -149,7 +177,7 @@ pub fn simple_moving_average(values: &[f64], window: usize) -> Vec<f64> {
         out.push(if !values[index].is_finite() || count == 0 {
             f64::NAN
         } else {
-            sum / count as f64
+            (sum / count as f64) * scale
         });
     }
     out
@@ -213,42 +241,130 @@ impl LinearFit {
 /// sample, where no line is determined.
 pub fn linear_fit(xs: &[f64], ys: &[f64]) -> Option<LinearFit> {
     let n = xs.len().min(ys.len());
-    let mut count = 0usize;
-    let mut mean_x = 0.0f64;
-    let mut mean_y = 0.0f64;
-    for index in 0..n {
-        let (x, y) = (xs[index], ys[index]);
-        if !x.is_finite() || !y.is_finite() {
-            continue;
-        }
-        count += 1;
-        mean_x += (x - mean_x) / count as f64;
-        mean_y += (y - mean_y) / count as f64;
-    }
-    if count < 2 {
+    let x_summary =
+        Summary::of((0..n).filter_map(|index| {
+            (xs[index].is_finite() && ys[index].is_finite()).then_some(xs[index])
+        }));
+    let y_summary =
+        Summary::of((0..n).filter_map(|index| {
+            (xs[index].is_finite() && ys[index].is_finite()).then_some(ys[index])
+        }));
+    let (Some(x_summary), Some(y_summary)) = (x_summary, y_summary) else {
+        return None;
+    };
+    let pair_count = x_summary.count;
+    if pair_count < 2 {
         return None;
     }
+    let mut mean_x = x_summary.mean;
+    let mut mean_y = y_summary.mean;
+    let x_fallback = xs[..n]
+        .iter()
+        .filter(|x| x.is_finite())
+        .fold(0.0f64, |scale, x| scale.max(x.abs()));
+    let y_fallback = ys[..n]
+        .iter()
+        .filter(|y| y.is_finite())
+        .fold(0.0f64, |scale, y| scale.max(y.abs()));
+    if x_fallback == 0.0 || y_fallback == 0.0 {
+        return None;
+    }
+    // The scaled summary is robust at the extremes, but unscaled Welford has
+    // better precision for ordinary large offsets such as epoch timestamps.
+    if x_fallback < f64::MAX / 2.0 && y_fallback < f64::MAX / 2.0 {
+        mean_x = 0.0;
+        mean_y = 0.0;
+        let mut count = 0usize;
+        for index in 0..n {
+            if xs[index].is_finite() && ys[index].is_finite() {
+                count += 1;
+                mean_x += (xs[index] - mean_x) / count as f64;
+                mean_y += (ys[index] - mean_y) / count as f64;
+            }
+        }
+    }
+    // Centered spreads preserve the useful precision of epoch-millisecond x
+    // values; the absolute-value fallback is only for a subtraction that
+    // itself overflows across opposite f64 extremes.
+    let x_overflow = (0..n).any(|index| {
+        xs[index].is_finite() && ys[index].is_finite() && !(xs[index] - mean_x).is_finite()
+    });
+    let x_spread = if x_overflow {
+        x_fallback
+    } else {
+        (0..n)
+            .filter(|&index| xs[index].is_finite() && ys[index].is_finite())
+            .map(|index| (xs[index] - mean_x).abs())
+            .fold(0.0f64, f64::max)
+            .max(1.0)
+    };
+    let y_overflow = (0..n).any(|index| {
+        ys[index].is_finite() && xs[index].is_finite() && !(ys[index] - mean_y).is_finite()
+    });
+    let y_spread = if y_overflow {
+        y_fallback
+    } else {
+        (0..n)
+            .filter(|&index| xs[index].is_finite() && ys[index].is_finite())
+            .map(|index| (ys[index] - mean_y).abs())
+            .filter(|value| value.is_finite())
+            .fold(0.0f64, f64::max)
+            .max(1.0)
+    };
+    let mean_x_scaled = mean_x / x_fallback;
+    let mean_y_scaled = mean_y / y_fallback;
     let mut sxx = 0.0f64;
     let mut sxy = 0.0f64;
     let mut syy = 0.0f64;
+    let mut raw_sxx = 0.0f64;
+    let mut raw_sxy = 0.0f64;
+    let mut raw_sxx_correction = 0.0f64;
+    let mut raw_sxy_correction = 0.0f64;
     for index in 0..n {
         let (x, y) = (xs[index], ys[index]);
         if !x.is_finite() || !y.is_finite() {
             continue;
         }
-        let dx = x - mean_x;
-        let dy = y - mean_y;
+        let dx_raw = x - mean_x;
+        let dy_raw = y - mean_y;
+        let dx = if dx_raw.is_finite() {
+            dx_raw / x_spread
+        } else {
+            x / x_fallback - mean_x_scaled
+        };
+        let dy = if dy_raw.is_finite() {
+            dy_raw / y_spread
+        } else {
+            y / y_fallback - mean_y_scaled
+        };
         sxx += dx * dx;
         sxy += dx * dy;
         syy += dy * dy;
+        if dx_raw.is_finite() && dy_raw.is_finite() {
+            let sxx_term = dx_raw * dx_raw;
+            let sxy_term = dx_raw * dy_raw;
+            let sxx_y = sxx_term - raw_sxx_correction;
+            let sxx_t = raw_sxx + sxx_y;
+            raw_sxx_correction = (sxx_t - raw_sxx) - sxx_y;
+            raw_sxx = sxx_t;
+            let sxy_y = sxy_term - raw_sxy_correction;
+            let sxy_t = raw_sxy + sxy_y;
+            raw_sxy_correction = (sxy_t - raw_sxy) - sxy_y;
+            raw_sxy = sxy_t;
+        }
     }
     if sxx <= 0.0 {
         return None;
     }
-    let slope = sxy / sxx;
+    let slope = if raw_sxx.is_finite() && raw_sxx > 0.0 {
+        raw_sxy / raw_sxx
+    } else {
+        (sxy / sxx) * (y_spread / x_spread)
+    };
     let intercept = mean_y - slope * mean_x;
     let r2 = if syy > 0.0 {
-        (sxy * sxy / (sxx * syy)).clamp(0.0, 1.0)
+        let correlation = sxy / (sxx.sqrt() * syy.sqrt());
+        (correlation * correlation).clamp(0.0, 1.0)
     } else {
         // A flat sample is explained perfectly by a flat line.
         1.0
@@ -257,7 +373,7 @@ pub fn linear_fit(xs: &[f64], ys: &[f64]) -> Option<LinearFit> {
         slope,
         intercept,
         r2,
-        count,
+        count: pair_count,
     })
 }
 
@@ -278,6 +394,16 @@ mod tests {
         approx(s.min, 2.0);
         approx(s.max, 9.0);
         approx(s.sum, 40.0);
+    }
+
+    #[test]
+    fn extreme_finite_statistics_remain_finite() {
+        let summary = Summary::of_slice(&[f64::MAX, f64::MAX / 2.0]).unwrap();
+        assert!(summary.mean.is_finite() && summary.stddev.is_finite());
+        let smoothed = simple_moving_average(&[f64::MAX, f64::MAX], 2);
+        assert!(smoothed.iter().all(|value| value.is_finite()));
+        let fit = linear_fit(&[f64::MAX, f64::MAX / 2.0], &[f64::MAX, f64::MAX / 2.0]).unwrap();
+        assert!(fit.slope.is_finite() && fit.r2.is_finite());
     }
 
     #[test]

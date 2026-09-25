@@ -102,7 +102,7 @@ pub fn prepare_histogram_hover(series: &[HistogramSeries]) -> HistogramHoverCach
                     .iter()
                     .map(|count| {
                         if count.is_finite() {
-                            total += count;
+                            total = crate::series::finite_add(total, *count);
                         }
                         total
                     })
@@ -1019,7 +1019,7 @@ pub fn row_at(layout: &ChartLayout, mouse_y: f64, rows: usize) -> Option<usize> 
 }
 
 pub fn nearest_index(xs: &[f64], target: f64) -> Option<usize> {
-    if xs.is_empty() {
+    if xs.is_empty() || !target.is_finite() {
         return None;
     }
     let i = xs.partition_point(|x| *x < target);
@@ -1099,6 +1099,12 @@ mod tests {
     };
     use crate::spec::ChartData;
     use crate::units::Unit;
+
+    #[test]
+    fn nearest_rejects_non_finite_targets() {
+        assert_eq!(nearest_index(&[1.0, 2.0], f64::NAN), None);
+        assert_eq!(nearest_index(&[1.0, 2.0], f64::INFINITY), None);
+    }
 
     #[test]
     fn nearest() {

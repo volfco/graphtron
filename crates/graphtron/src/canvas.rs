@@ -43,10 +43,21 @@ impl CanvasSurface {
         self.css_w = css_w;
         self.css_h = css_h;
         self.dpr = dpr;
-        self.canvas.set_width((css_w * dpr).round().max(1.0) as u32);
-        self.canvas
-            .set_height((css_h * dpr).round().max(1.0) as u32);
-        let _ = self.ctx.set_transform(dpr, 0.0, 0.0, dpr, 0.0, 0.0);
+        let pixel_w = (css_w * dpr).round().max(1.0) as u32;
+        let pixel_h = (css_h * dpr).round().max(1.0) as u32;
+        self.canvas.set_width(pixel_w);
+        self.canvas.set_height(pixel_h);
+        // The backing store is rounded independently in each dimension. Use
+        // the resulting physical/CSS ratios so fractional CSS sizes and DPRs
+        // do not leave a partially transformed strip.
+        let _ = self.ctx.set_transform(
+            pixel_w as f64 / css_w,
+            0.0,
+            0.0,
+            pixel_h as f64 / css_h,
+            0.0,
+            0.0,
+        );
         true
     }
 
@@ -132,6 +143,14 @@ mod tests {
         let left = crisp_rect_at_dpr(0.2, 0.0, 1.1, 1.0, 1.25);
         let right = crisp_rect_at_dpr(1.3, 0.0, 1.1, 1.0, 1.25);
         assert!((left.0 + left.2 - right.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn fractional_dpr_transform_matches_rounded_backing_store() {
+        // This is the transform selected by sync_size for a 1.2 CSS pixel
+        // canvas at DPR 1.25: 1.5 physical pixels are rounded to two.
+        let pixel_w = (1.2_f64 * 1.25_f64).round() as u32;
+        assert_eq!(pixel_w as f64 / 1.2, 5.0 / 3.0);
     }
 
     #[test]

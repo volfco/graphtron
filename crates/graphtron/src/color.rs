@@ -14,7 +14,12 @@ pub struct Rgba {
 
 impl Rgba {
     pub const fn new(r: u8, g: u8, b: u8, a: f64) -> Self {
-        Self { r, g, b, a }
+        Self {
+            r,
+            g,
+            b,
+            a: sanitize_alpha(a),
+        }
     }
 
     /// Opaque color from a 0xRRGGBB literal.
@@ -24,25 +29,36 @@ impl Rgba {
 
     /// Color from a 0xRRGGBB literal with explicit alpha.
     pub const fn hex_a(rgb: u32, a: f64) -> Self {
-        Self {
-            r: ((rgb >> 16) & 0xff) as u8,
-            g: ((rgb >> 8) & 0xff) as u8,
-            b: (rgb & 0xff) as u8,
+        Self::new(
+            ((rgb >> 16) & 0xff) as u8,
+            ((rgb >> 8) & 0xff) as u8,
+            (rgb & 0xff) as u8,
             a,
-        }
+        )
     }
 
     pub const fn with_alpha(self, a: f64) -> Self {
-        Self { a, ..self }
+        Self::new(self.r, self.g, self.b, a)
     }
 
     /// CSS color string. Fully-opaque colors use the compact `#rrggbb` form.
     pub fn to_css(&self) -> String {
-        if self.a >= 1.0 {
+        let alpha = sanitize_alpha(self.a);
+        if alpha >= 1.0 {
             format!("#{:02x}{:02x}{:02x}", self.r, self.g, self.b)
         } else {
-            format!("rgba({},{},{},{})", self.r, self.g, self.b, self.a)
+            format!("rgba({},{},{},{})", self.r, self.g, self.b, alpha)
         }
+    }
+}
+
+const fn sanitize_alpha(alpha: f64) -> f64 {
+    if alpha.is_nan() || alpha < 0.0 {
+        0.0
+    } else if alpha > 1.0 {
+        1.0
+    } else {
+        alpha
     }
 }
 
@@ -213,6 +229,13 @@ mod tests {
         let c = Rgba::hex(0x5794F2);
         assert_eq!((c.r, c.g, c.b, c.a), (0x57, 0x94, 0xF2, 1.0));
         assert_eq!(c.to_css(), "#5794f2");
+    }
+
+    #[test]
+    fn alpha_is_sanitized_at_construction_boundaries() {
+        assert_eq!(Rgba::new(1, 2, 3, -4.0).a, 0.0);
+        assert_eq!(Rgba::new(1, 2, 3, 4.0).a, 1.0);
+        assert_eq!(Rgba::new(1, 2, 3, f64::NAN).a, 0.0);
     }
 
     #[test]

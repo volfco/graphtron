@@ -2736,6 +2736,10 @@ fn stroke_series(
 
     let ops = line_path(&pixel_points, config.smooth);
     if ops.is_empty() {
+        // A singleton has no line path, but it is still a valid observation.
+        // Draw the same default marker as a sparse series so one-point lines
+        // and areas do not silently render blank.
+        draw_point_markers(ctx, &pixel_points, color, config);
         ctx.restore();
         return;
     }
@@ -3897,6 +3901,24 @@ fn draw_band(
             ctx.stroke();
             ctx.set_shadow_color("transparent");
             ctx.set_shadow_blur(0.0);
+        } else {
+            // A one-sample band has no envelope polygon or center path. Its
+            // center is still a visible sample and must not disappear.
+            let colors = SeriesColors::new(color);
+            batch_glow_dots(
+                ctx,
+                &center_px
+                    .iter()
+                    .copied()
+                    .filter(|(x, y)| x.is_finite() && y.is_finite())
+                    .collect::<Vec<_>>(),
+                &colors.core,
+                2.5,
+                config
+                    .glow
+                    .then_some((colors.glow_shadow.as_str(), 6.0 * config.glow_intensity)),
+                None,
+            );
         }
     }
 
@@ -4069,6 +4091,24 @@ fn draw_stacked_areas(
         ctx.begin_path();
         replay_path(ctx, &ops);
         ctx.stroke();
+        if ops.is_empty() {
+            let points: Vec<(f64, f64)> = edge
+                .iter()
+                .copied()
+                .filter(|(x, y)| x.is_finite() && y.is_finite())
+                .collect();
+            let colors = SeriesColors::new(color);
+            batch_glow_dots(
+                ctx,
+                &points,
+                &colors.core,
+                2.5,
+                config
+                    .glow
+                    .then_some((colors.glow_shadow.as_str(), 6.0 * config.glow_intensity)),
+                None,
+            );
+        }
     }
 
     ctx.restore();
@@ -4244,6 +4284,11 @@ pub fn draw_overlay(
     surface.clear();
     let plot = layout.plot;
 
+    // Annotations apply to every chart kind, including partition overlays.
+    for ann in annotations {
+        draw_annotation(surface, layout, ann, theme, &opts.axis_font);
+    }
+
     // Selection highlight
     if crate::partition::items(data).is_some() {
         if let Some(info) = hover_info
@@ -4283,11 +4328,6 @@ pub fn draw_overlay(
         ctx.stroke_rect(crisp_for(surface, a, 1.0), plot.y, b - a, plot.h);
         ctx.set_shadow_color("transparent");
         ctx.set_shadow_blur(0.0);
-    }
-
-    // Annotations
-    for ann in annotations {
-        draw_annotation(surface, layout, ann, theme, &opts.axis_font);
     }
 
     // Bucket-based overlay. Continue into guide/tooltip rendering: the old

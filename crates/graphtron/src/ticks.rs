@@ -76,11 +76,20 @@ pub fn nice_log_domain(min: f64, max: f64) -> (f64, f64) {
         return (min, max);
     }
     let (min, max) = if min <= max { (min, max) } else { (max, min) };
+    // Subnormal positive values have a finite logarithm, but the enclosing
+    // 1/2/5 boundary can underflow to zero. Keep the public log domain above
+    // the smallest representable scale instead of returning `-inf`.
+    let min = min.max(crate::scale::LOG_EPSILON);
+    let max = max.max(crate::scale::LOG_EPSILON);
+    if min == max {
+        return (min, (min * 10.0).min(f64::MAX));
+    }
     (log_floor(min), log_ceil(max))
 }
 
 /// Largest 1/2/5 x 10^k boundary at or below `value` (strictly positive).
 fn log_floor(value: f64) -> f64 {
+    let value = value.max(crate::scale::LOG_EPSILON);
     let decade = value.log10().floor();
     let base = 10f64.powf(decade);
     let mantissa = value / base;
@@ -91,11 +100,12 @@ fn log_floor(value: f64) -> f64 {
     } else {
         1.0
     };
-    base * m
+    (base * m).max(crate::scale::LOG_EPSILON)
 }
 
 /// Smallest 1/2/5 x 10^k boundary at or above `value` (strictly positive).
 fn log_ceil(value: f64) -> f64 {
+    let value = value.max(crate::scale::LOG_EPSILON);
     let decade = value.log10().floor();
     let base = 10f64.powf(decade);
     let mantissa = value / base;
@@ -108,6 +118,7 @@ fn log_ceil(value: f64) -> f64 {
     } else {
         base * 10.0
     }
+    .max(crate::scale::LOG_EPSILON)
 }
 
 /// Logarithmic ticks in **data** space covering `[min, max]` (both strictly
@@ -196,31 +207,42 @@ pub fn time_ticks(from_ms: i64, to_ms: i64, max_ticks: usize) -> Vec<TimeTick> {
     if to_ms <= from_ms || max_ticks == 0 {
         return vec![];
     }
-    let span = to_ms - from_ms;
-    let target = span / max_ticks.max(1) as i64;
+    // Do the span arithmetic in i128: a valid i64 domain can be wider than
+    // i64::MAX, and `to - from`/`t += step` must not wrap into an endless loop.
+    let span = to_ms as i128 - from_ms as i128;
+    let target = span / max_ticks.max(1) as i128;
     let step = TIME_STEPS_MS
         .iter()
         .copied()
-        .find(|s| *s >= target)
-        .unwrap_or(*TIME_STEPS_MS.last().unwrap());
+        .find(|s| (*s as i128) >= target)
+        .unwrap_or(*TIME_STEPS_MS.last().unwrap()) as i128;
 
     let crosses_year = {
         let (y0, ..) = civil_from_unix(from_ms.div_euclid(1000));
         let (y1, ..) = civil_from_unix(to_ms.div_euclid(1000));
         y0 != y1
     };
-    let fmt = match (label_format(span), crosses_year) {
+    let fmt = match (
+        label_format(span.min(i64::MAX as i128) as i64),
+        crosses_year,
+    ) {
         (TimeFormat::Day, true) => TimeFormat::DayYear,
         (f, _) => f,
     };
-    let first = from_ms.div_euclid(step) * step;
+    let first = (from_ms as i128).div_euclid(step) * step;
     let mut ticks = Vec::new();
     let mut t = first;
-    while t <= to_ms {
-        if t >= from_ms {
+    let limit = (to_ms as i128).min((from_ms as i128) + step * max_ticks as i128);
+    // A malicious/very large range must still be bounded even when the time
+    // ladder cannot provide a step large enough to cover it.
+    let output_limit = max_ticks.saturating_add(2);
+    while t <= limit && ticks.len() < output_limit {
+        if t >= from_ms as i128
+            && let Ok(ms) = i64::try_from(t)
+        {
             ticks.push(TimeTick {
-                ms: t,
-                label: format_ts(t, fmt),
+                ms,
+                label: format_ts(ms, fmt),
             });
         }
         t += step;
@@ -340,6 +362,8 @@ mod tests {
 
     #[test]
     fn nice_log_domain_snaps_to_enclosing_boundaries() {
+        let (lo, hi) = nice_log_domain(f64::from_bits(1), f64::from_bits(1));
+        assert!(lo.is_finite() && hi.is_finite() && lo > 0.0 && lo < hi);
         assert_eq!(nice_log_domain(3.0, 40.0), (2.0, 50.0));
         assert_eq!(nice_log_domain(120.0, 900.0), (100.0, 1000.0));
         // Already-nice bounds stay put.
@@ -376,6 +400,13 @@ mod tests {
         let subnormal = linear_ticks(0.0, f64::from_bits(1), 5);
         assert!(subnormal.len() <= 7);
         assert!(subnormal.windows(2).all(|w| w[1] > w[0]));
+    }
+
+    #[test]
+    fn time_ticks_bound_extreme_ranges_without_overflow() {
+        let ticks = time_ticks(i64::MIN, i64::MAX, 8);
+        assert!(ticks.len() <= 10, "unbounded time ticks: {}", ticks.len());
+        assert!(ticks.windows(2).all(|pair| pair[0].ms < pair[1].ms));
     }
 
     #[test]
