@@ -2,11 +2,11 @@ use dioxus::prelude::*;
 use graphtron::hit::{hit_test_chart_with_cache, prepare_histogram_hover};
 use graphtron::{
     Action, Animation, Annotation, CanvasSurface, ChartData, ChartKind, ChartSpec, CursorOverlay,
-    DragMode, InteractState, LegendFormat, LegendPosition, PALETTE, RenderOptions, SeriesData,
-    XAxisKind, animate_range, annotate_delta, draw, draw_overlay, series_color,
+    DragMode, InteractState, LegendFormat, LegendPosition, PALETTE, PinchState, RenderOptions,
+    SeriesData, XAxisKind, animate_range, annotate_delta, draw, draw_overlay, series_color,
 };
 use std::cell::RefCell;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::Closure;
@@ -34,6 +34,9 @@ struct ChartLocals {
     /// (heatmaps, horizontal bars, and timelines) hit-test accurately without
     /// inventing a row in a synchronized sibling chart.
     hover_pointer: Option<HoverPointer>,
+    /// Active touch contacts and their current pinch baseline, keyed by the
+    /// browser's stable pointer ID.
+    touch: TouchPinch,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -46,6 +49,22 @@ struct HoverPointer {
     /// backwards-compatible synchronization, but local linear charts retain
     /// this precision for hover guides and semantic hit testing.
     ts: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct PinchGesture {
+    first_id: i32,
+    second_id: i32,
+    /// Previous sample. `PinchState::start_dist` is the factor numerator, so
+    /// replacing this after every move makes each emitted zoom incremental.
+    previous: PinchState,
+}
+
+#[derive(Debug, Default)]
+struct TouchPinch {
+    points: HashMap<i32, (f64, f64)>,
+    gesture: Option<PinchGesture>,
+    multitouch: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -73,10 +92,27 @@ impl DomainAnimation {
     }
 }
 
+struct WindowResizeCallback {
+    window: web_sys::Window,
+    callback: Closure<dyn FnMut()>,
+}
+
+impl Drop for WindowResizeCallback {
+    fn drop(&mut self) {
+        let _ = self
+            .window
+            .remove_event_listener_with_callback("resize", self.callback.as_ref().unchecked_ref());
+    }
+}
+
 fn local_hover_timestamp(cursor: Cursor, pointer: Option<HoverPointer>) -> Option<f64> {
     pointer
         .filter(|pointer| cursor.hover == Some(pointer.hover_ms))
         .map(|pointer| pointer.ts)
+}
+
+fn inspector_reference_changed(inspected: Option<i64>, frozen: Option<i64>) -> bool {
+    inspected != frozen
 }
 
 /// Specs own portable chart configuration, while the component prop remains a
@@ -180,6 +216,7 @@ pub fn GraphtronChart(
             last_range: (0.0, 1.0),
             cursor_display_ts: None,
             hover_pointer: None,
+            touch: TouchPinch::default(),
         }))
     });
 
@@ -194,8 +231,21 @@ pub fn GraphtronChart(
     let local_domain: Signal<Option<(f64, f64)>> = use_signal(|| None);
     let x_axis = spec.x_axis.clone();
 
-    // Hidden-series set (legend toggles).
+    // Hidden-series set (legend toggles). Positional entries from an older,
+    // longer data set are removed when data changes so they cannot affect
+    // filtered renderer options or unexpectedly reappear after data grows.
     let hidden: Signal<HashSet<usize>> = use_signal(HashSet::new);
+    let active_hidden = use_memo(move || reconcile_hidden(&hidden(), series_count(&data())));
+    {
+        let mut hidden = hidden;
+        let active_hidden = active_hidden;
+        use_effect(move || {
+            let next = active_hidden();
+            if *hidden.peek() != next {
+                hidden.set(next);
+            }
+        });
+    }
 
     // In a Dioxus embedding the DOM legend is interactive, so it replaces the
     // canvas-only legend when either legend control asks to show one. This
@@ -216,7 +266,10 @@ pub fn GraphtronChart(
 
     // Data as drawn: hidden series removed, palette colors materialized so
     // hiding one series doesn't recolor the rest.
-    let display_data = use_memo(move || filter_hidden(&data(), &hidden()));
+    let display_data = use_memo(move || filter_hidden(&data(), &active_hidden()));
+    // Cache the displayed autofit separately: animation ticks must not rescan
+    // history, while existing hidden-series domain behavior stays unchanged.
+    let display_extent = use_memo(move || data_x_domain(&display_data()));
     // Cache the full extent once per data update, never scan dense data on
     // wheel/pointer events or shrink bounds when a legend entry is hidden.
     let zoom_extent = use_memo(move || data_x_domain(&data()));
@@ -283,21 +336,20 @@ pub fn GraphtronChart(
     };
 
     // Keep the DPR-scaled backing store fresh when the window (and possibly
-    // the devicePixelRatio) changes — `sync_size` re-reads DPR on every draw,
-    // this just guarantees a draw is triggered. Closure stays alive for the
-    // component's lifetime via use_hook.
+    // the devicePixelRatio) changes. The guard's Drop removes the same callback
+    // when this component is cleaned up.
     use_hook(|| {
         let mut tick = redraw_tick;
         let mut otick = overlay_tick;
-        let closure = Closure::<dyn FnMut()>::new(move || {
+        let callback = Closure::<dyn FnMut()>::new(move || {
             tick += 1;
             otick += 1;
         });
-        if let Some(win) = web_sys::window() {
-            let _ =
-                win.add_event_listener_with_callback("resize", closure.as_ref().unchecked_ref());
-        }
-        Rc::new(closure)
+        let window = web_sys::window()?;
+        window
+            .add_event_listener_with_callback("resize", callback.as_ref().unchecked_ref())
+            .ok()?;
+        Some(Rc::new(WindowResizeCallback { window, callback }))
     });
 
     // Data layer: redraw on data / range / options / size change. When a zoom
@@ -307,11 +359,16 @@ pub fn GraphtronChart(
         let locals = locals.clone();
         let spec = draw_spec;
         let options = options.clone();
+        let active_hidden = active_hidden;
+        let display_extent = display_extent;
         let mut anim = anim;
         let mut last_drawn_domain = last_drawn_domain;
         use_effect(move || {
-            let data_now = display_data();
-            let options = filtered_options(&options, &hidden.peek());
+            // Subscribe without cloning, then borrow memoized data: animation
+            // ticks change only the viewport and must not clone full history.
+            let _ = display_data.read();
+            let data_now = display_data.peek();
+            let options = filtered_options(&options, &active_hidden.peek());
             let (target_from, target_to, explicit_domain) = if let Some(d) = domain {
                 let (from, to) = d();
                 (from, to, true)
@@ -321,7 +378,8 @@ pub fn GraphtronChart(
             } else if let Some((from, to)) = local_domain() {
                 (from, to, true)
             } else {
-                let (from, to) = data_x_domain(&data_now).unwrap_or((0.0, 60_000.0));
+                let cached_extent = *display_extent.peek();
+                let (from, to) = cached_extent.unwrap_or((0.0, 60_000.0));
                 (from, to, false)
             };
             let _ = redraw_tick();
@@ -377,7 +435,9 @@ pub fn GraphtronChart(
             l.layout = Some(layout);
             l.partition_geometry = Rc::new(
                 graphtron::partition::items(&data_now)
-                    .map(|items| graphtron::partition::geometry(data_now.kind(), items, layout.plot))
+                    .map(|items| {
+                        graphtron::partition::geometry(data_now.kind(), items, layout.plot)
+                    })
                     .unwrap_or_default(),
             );
         });
@@ -389,6 +449,7 @@ pub fn GraphtronChart(
         let locals = locals.clone();
         let spec = spec.clone();
         let options = options.clone();
+        let active_hidden = active_hidden;
         let annotations = annotations.clone();
         use_effect(move || {
             let cur = cursor();
@@ -440,7 +501,7 @@ pub fn GraphtronChart(
             // hover/freeze redraw; the borrow is dropped before the effect
             // returns and is never held across an await.
             let data_now = display_data.peek();
-            let options = filtered_options(&options, &hidden.peek());
+            let options = filtered_options(&options, &active_hidden.peek());
             let histogram_cache = histogram_hover_cache.peek();
             let merged_annotations = merge_annotations(&spec.annotations, &annotations);
             // The free cursor readout only makes sense on the chart the
@@ -534,7 +595,7 @@ pub fn GraphtronChart(
             // Capture once per frozen reference. Moving toward the inspector's
             // controls must not replace its values or collapse the open panel.
             // This is a snapshot, retained until the reference is cleared.
-            if *inspected_frozen.peek() != cur.frozen {
+            if inspector_reference_changed(*inspected_frozen.peek(), cur.frozen) {
                 inspected_frozen.set(cur.frozen);
                 accessible_hover.set(cur.frozen.and_then(|_| hover_info.clone()));
                 inspector_expanded.set(false);
@@ -707,46 +768,102 @@ pub fn GraphtronChart(
     let on_pointer_down = {
         let locals = locals.clone();
         move |evt: PointerEvent| {
-            if !interactive || !evt.data().is_primary() {
+            if !interactive {
+                return;
+            }
+            let is_touch = evt.data().pointer_type() == "touch";
+            if !is_touch && !evt.data().is_primary() {
                 return;
             }
             capture_pointer(&evt);
             let point = evt.element_coordinates();
+            let (x, y) = (point.x, point.y);
+            let became_pinch = {
+                let mut l = locals.borrow_mut();
+                if is_touch {
+                    l.touch.down(evt.data().pointer_id(), (x, y));
+                    if l.touch.multitouch {
+                        l.interact = InteractState::Idle;
+                        l.hover_pointer = None;
+                        true
+                    } else {
+                        l.interact.on_mouse_down(x);
+                        false
+                    }
+                } else {
+                    false
+                }
+            };
+            if became_pinch {
+                apply(vec![Action::ClearHover]);
+                return;
+            }
+            if is_touch {
+                return;
+            }
             let mut l = locals.borrow_mut();
             if let Some(layout) = l.layout {
-                let ts = layout.ts_at(point.x);
+                let ts = layout.ts_at(x);
                 l.hover_pointer = Some(HoverPointer {
-                    x: point.x,
-                    y: point.y,
+                    x,
+                    y,
                     hover_ms: ts as i64,
                     ts,
                 });
             }
-            l.interact.on_mouse_down(point.x);
+            l.interact.on_mouse_down(x);
         }
     };
 
     let on_pointer_move = {
         let locals = locals.clone();
+        let x_axis = x_axis.clone();
         let mut overlay_tick = overlay_tick;
         move |evt: PointerEvent| {
-            if !interactive || !evt.data().is_primary() {
+            if !interactive {
                 return;
             }
             let point = evt.element_coordinates();
             let (x, y) = (point.x, point.y);
+            let is_touch = evt.data().pointer_type() == "touch";
+            if !is_touch && !evt.data().is_primary() {
+                return;
+            }
             let actions = {
                 let mut l = locals.borrow_mut();
                 match l.layout {
                     Some(layout) => {
-                        let ts = layout.ts_at(x);
-                        l.hover_pointer = Some(HoverPointer {
-                            x,
-                            y,
-                            hover_ms: ts as i64,
-                            ts,
-                        });
-                        l.interact.on_mouse_move(x, &layout)
+                        if is_touch {
+                            l.touch.move_pointer(evt.data().pointer_id(), (x, y));
+                            if l.touch.multitouch {
+                                let min_span = interaction_min_span(
+                                    &x_axis,
+                                    layout.x_scale.d0,
+                                    layout.x_scale.d1,
+                                )
+                                .unwrap_or(f64::INFINITY);
+                                let interact = l.interact;
+                                l.touch.pinch_actions(&interact, &layout, min_span)
+                            } else {
+                                let ts = layout.ts_at(x);
+                                l.hover_pointer = Some(HoverPointer {
+                                    x,
+                                    y,
+                                    hover_ms: ts as i64,
+                                    ts,
+                                });
+                                l.interact.on_mouse_move(x, &layout)
+                            }
+                        } else {
+                            let ts = layout.ts_at(x);
+                            l.hover_pointer = Some(HoverPointer {
+                                x,
+                                y,
+                                hover_ms: ts as i64,
+                                ts,
+                            });
+                            l.interact.on_mouse_move(x, &layout)
+                        }
                     }
                     None => vec![],
                 }
@@ -763,7 +880,11 @@ pub fn GraphtronChart(
         let locals = locals.clone();
         let x_axis = x_axis.clone();
         move |evt: PointerEvent| {
-            if !interactive || !evt.data().is_primary() {
+            if !interactive {
+                return;
+            }
+            let is_touch = evt.data().pointer_type() == "touch";
+            if !is_touch && !evt.data().is_primary() {
                 return;
             }
             release_pointer(&evt);
@@ -776,22 +897,41 @@ pub fn GraphtronChart(
             });
             let actions = {
                 let mut l = locals.borrow_mut();
-                match l.layout {
-                    Some(layout) => {
-                        let ts = layout.ts_at(x);
-                        l.hover_pointer = Some(HoverPointer {
-                            x,
-                            y: point.y,
-                            hover_ms: ts as i64,
-                            ts,
-                        });
-                        let min_span =
-                            interaction_min_span(&x_axis, layout.x_scale.d0, layout.x_scale.d1)
-                                .unwrap_or(f64::INFINITY);
-                        l.interact
-                            .on_mouse_up_with_min_span(x, &layout, mode, min_span)
+                if is_touch {
+                    let was_multitouch = l.touch.multitouch;
+                    l.touch.up(evt.data().pointer_id());
+                    if was_multitouch {
+                        vec![]
+                    } else {
+                        match l.layout {
+                            Some(layout) => l.interact.on_mouse_up_with_min_span(
+                                x,
+                                &layout,
+                                mode,
+                                interaction_min_span(&x_axis, layout.x_scale.d0, layout.x_scale.d1)
+                                    .unwrap_or(f64::INFINITY),
+                            ),
+                            None => vec![],
+                        }
                     }
-                    None => vec![],
+                } else {
+                    match l.layout {
+                        Some(layout) => {
+                            let ts = layout.ts_at(x);
+                            l.hover_pointer = Some(HoverPointer {
+                                x,
+                                y: point.y,
+                                hover_ms: ts as i64,
+                                ts,
+                            });
+                            let min_span =
+                                interaction_min_span(&x_axis, layout.x_scale.d0, layout.x_scale.d1)
+                                    .unwrap_or(f64::INFINITY);
+                            l.interact
+                                .on_mouse_up_with_min_span(x, &layout, mode, min_span)
+                        }
+                        None => vec![],
+                    }
                 }
             };
             apply(actions);
@@ -800,14 +940,9 @@ pub fn GraphtronChart(
 
     let on_pointer_leave = {
         let locals = locals.clone();
-        move |_evt: PointerEvent| {
-            if !interactive {
-                return;
-            }
-            // A frozen hover owns the inspector's page controls. Moving from
-            // the canvas into that DOM overlay must not clear the frozen
-            // target before the user can activate Previous/Next.
-            if cursor().frozen.is_some() {
+        let mut overlay_tick = overlay_tick;
+        move |evt: PointerEvent| {
+            if !interactive || evt.data().pointer_type() == "touch" {
                 return;
             }
             let actions = {
@@ -815,6 +950,9 @@ pub fn GraphtronChart(
                 l.hover_pointer = None;
                 l.interact.on_mouse_leave()
             };
+            // Clear live hover even when frozen. The accessible snapshot is
+            // signal-owned and remains until the frozen reference changes.
+            overlay_tick += 1;
             apply(actions);
         }
     };
@@ -828,6 +966,9 @@ pub fn GraphtronChart(
             release_pointer(&evt);
             let actions = {
                 let mut l = locals.borrow_mut();
+                if evt.data().pointer_type() == "touch" {
+                    l.touch.cancel(evt.data().pointer_id());
+                }
                 l.hover_pointer = None;
                 l.interact.on_mouse_leave()
             };
@@ -911,7 +1052,7 @@ pub fn GraphtronChart(
     let chart_summary = use_memo(move || chart_summary(&data()));
     let interaction_instructions = if interactive && !matches!(&x_axis, XAxisKind::Category { .. })
     {
-        "Pointer, touch, or pen: drag to zoom, Shift-drag to pan, click to freeze the cursor, and double-click to reset. Keyboard: arrow keys pan, plus or minus zoom, Home or End resets, and Escape clears the frozen cursor."
+        "Pointer, touch, or pen: drag to zoom, pinch to zoom, Shift-drag to pan, click to freeze the cursor, and double-click to reset. Keyboard: arrow keys pan, plus or minus zoom, Home or End resets, and Escape clears the frozen cursor."
     } else if interactive {
         "Pointer, touch, or pen: click to freeze the cursor. Keyboard: Escape clears the frozen cursor. Categorical x axes do not support viewport zooming."
     } else {
@@ -1043,6 +1184,100 @@ pub fn GraphtronChart(
             }
         }
     }
+}
+
+impl TouchPinch {
+    fn down(&mut self, id: i32, point: (f64, f64)) {
+        self.points.insert(id, point);
+        if self.points.len() > 1 {
+            self.multitouch = true;
+        }
+        if self.gesture.is_none() {
+            self.restart();
+        }
+    }
+
+    fn move_pointer(&mut self, id: i32, point: (f64, f64)) {
+        if self.points.contains_key(&id) {
+            self.points.insert(id, point);
+        }
+    }
+
+    fn up(&mut self, id: i32) {
+        self.points.remove(&id);
+        if self
+            .gesture
+            .is_some_and(|gesture| gesture.first_id == id || gesture.second_id == id)
+        {
+            self.restart();
+        }
+        if self.points.is_empty() {
+            self.gesture = None;
+            self.multitouch = false;
+        }
+    }
+
+    fn cancel(&mut self, id: i32) {
+        self.up(id);
+    }
+
+    fn restart(&mut self) {
+        let mut ids = self.points.keys().copied();
+        let (Some(first_id), Some(second_id)) = (ids.next(), ids.next()) else {
+            self.gesture = None;
+            return;
+        };
+        let (Some(first), Some(second)) = (self.points.get(&first_id), self.points.get(&second_id))
+        else {
+            self.gesture = None;
+            return;
+        };
+        let state = pinch_state(*first, *second);
+        self.gesture = state.map(|previous| PinchGesture {
+            first_id,
+            second_id,
+            previous,
+        });
+    }
+
+    fn pinch_actions(
+        &mut self,
+        interact: &InteractState,
+        layout: &graphtron::ChartLayout,
+        min_span: f64,
+    ) -> Vec<Action> {
+        let Some(gesture) = self.gesture else {
+            return vec![];
+        };
+        let (Some(first), Some(second)) = (
+            self.points.get(&gesture.first_id),
+            self.points.get(&gesture.second_id),
+        ) else {
+            self.restart();
+            return vec![];
+        };
+        let Some(current) = pinch_state(*first, *second) else {
+            return vec![];
+        };
+        if current.cur_dist == gesture.previous.cur_dist {
+            return vec![];
+        }
+        let actions = interact.on_pinch_with_layout(&gesture.previous, &current, layout, min_span);
+        self.gesture.as_mut().unwrap().previous = current;
+        actions
+    }
+}
+
+fn pinch_state(first: (f64, f64), second: (f64, f64)) -> Option<PinchState> {
+    let dx = second.0 - first.0;
+    let dy = second.1 - first.1;
+    let distance = dx.hypot(dy);
+    (distance.is_finite() && distance > 0.0).then_some(PinchState {
+        start_dist: distance,
+        cur_dist: distance,
+        cx: (first.0 + second.0) / 2.0,
+        cy: (first.1 + second.1) / 2.0,
+    })
 }
 
 fn element_canvas(evt: &MountedEvent) -> Option<web_sys::HtmlCanvasElement> {
@@ -1327,6 +1562,34 @@ fn format_legend_label(name: &str, value: Option<&str>, format: LegendFormat) ->
             .map(|value| format!("{name}  {value}"))
             .unwrap_or_else(|| name.to_string()),
         LegendFormat::ValueOnly => value.unwrap_or(name).to_string(),
+    }
+}
+
+fn reconcile_hidden(hidden: &HashSet<usize>, series_count: usize) -> HashSet<usize> {
+    hidden
+        .iter()
+        .copied()
+        .filter(|index| *index < series_count)
+        .collect()
+}
+
+fn series_count(data: &ChartData) -> usize {
+    match data {
+        ChartData::Pie(items) | ChartData::Treemap(items) | ChartData::HostMap(items) => {
+            items.len()
+        }
+        ChartData::Lines(series)
+        | ChartData::Areas(series)
+        | ChartData::Bars(series)
+        | ChartData::Points(series)
+        | ChartData::Scatter(series)
+        | ChartData::Heatmap(series)
+        | ChartData::Step(series) => series.len(),
+        ChartData::Ohlc(series) => series.len(),
+        ChartData::Histogram(series) => series.len(),
+        ChartData::HBar(series) => series.len(),
+        ChartData::StateTimeline(series) => series.len(),
+        ChartData::Band(series) => series.len(),
     }
 }
 
@@ -1674,6 +1937,61 @@ mod tests {
         );
 
         assert_eq!(merged, vec![threshold, marker]);
+    }
+
+    #[test]
+    fn touch_pinch_tracks_pointer_ids_and_cleans_up_after_last_release() {
+        let layout = graphtron::ChartLayout::compute(400.0, 200.0, 0.0, 100.0, 0.0, 1.0);
+        let mut touch = TouchPinch::default();
+        touch.down(7, (100.0, 50.0));
+        touch.down(42, (200.0, 50.0));
+        let gesture = touch.gesture.expect("two contacts start a pinch");
+        assert_eq!(
+            [gesture.first_id, gesture.second_id]
+                .into_iter()
+                .collect::<HashSet<_>>(),
+            HashSet::from([7, 42])
+        );
+
+        touch.move_pointer(7, (50.0, 50.0));
+        let actions = touch.pinch_actions(&InteractState::Idle, &layout, 0.01);
+        assert!(matches!(actions.as_slice(), [Action::ZoomTo { .. }]));
+        assert_eq!(touch.gesture.unwrap().previous.cur_dist, 150.0);
+
+        touch.up(7);
+        assert!(touch.points.len() == 1);
+        assert!(touch.gesture.is_none());
+        assert!(touch.multitouch);
+        touch.up(42);
+        assert!(touch.points.is_empty());
+        assert!(touch.gesture.is_none());
+        assert!(!touch.multitouch);
+    }
+
+    #[test]
+    fn touch_cancel_removes_the_remaining_contact() {
+        let mut touch = TouchPinch::default();
+        touch.down(3, (10.0, 10.0));
+        touch.down(4, (30.0, 10.0));
+        touch.cancel(3);
+        assert!(touch.gesture.is_none());
+        touch.cancel(4);
+        assert!(touch.points.is_empty());
+        assert!(!touch.multitouch);
+    }
+
+    #[test]
+    fn hidden_positions_are_reconciled_to_the_current_series_count() {
+        let hidden = HashSet::from([0, 2, 5]);
+        assert_eq!(reconcile_hidden(&hidden, 3), HashSet::from([0, 2]));
+        assert!(reconcile_hidden(&hidden, 0).is_empty());
+    }
+
+    #[test]
+    fn frozen_inspector_snapshot_survives_live_hover_changes() {
+        assert!(!inspector_reference_changed(Some(7), Some(7)));
+        assert!(inspector_reference_changed(Some(7), Some(8)));
+        assert!(inspector_reference_changed(Some(7), None));
     }
 
     #[test]
