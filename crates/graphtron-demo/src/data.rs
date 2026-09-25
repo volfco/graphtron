@@ -268,24 +268,28 @@ pub fn generate() -> Dataset {
         .collect();
 
     // Latency percentiles three decades apart (log-axis showcase).
-    let decades = [("p50", 1.2_f64, 0x00FF41), ("p99", 45.0, 0xFFD700), ("p999", 900.0, 0xFF3366)]
-        .into_iter()
-        .map(|(name, base, color)| {
-            let ys = (0..n)
-                .map(|i| {
-                    let t = i as f64 / n as f64 * std::f64::consts::TAU * 2.0;
-                    // Multiplicative noise, which is what a log axis reads well.
-                    base * (1.0 + 0.35 * t.sin()) * (0.75 + rng.next_unit() * 0.5)
-                })
-                .collect();
-            SeriesData {
-                name: name.into(),
-                xs: xs.clone(),
-                ys,
-                color: Some(color),
-            }
-        })
-        .collect();
+    let decades = [
+        ("p50", 1.2_f64, 0x00FF41),
+        ("p99", 45.0, 0xFFD700),
+        ("p999", 900.0, 0xFF3366),
+    ]
+    .into_iter()
+    .map(|(name, base, color)| {
+        let ys = (0..n)
+            .map(|i| {
+                let t = i as f64 / n as f64 * std::f64::consts::TAU * 2.0;
+                // Multiplicative noise, which is what a log axis reads well.
+                base * (1.0 + 0.35 * t.sin()) * (0.75 + rng.next_unit() * 0.5)
+            })
+            .collect();
+        SeriesData {
+            name: name.into(),
+            xs: xs.clone(),
+            ys,
+            color: Some(color),
+        }
+    })
+    .collect();
 
     // Request rate per host: one heatmap row per host, colored by value.
     let heatmap = ["web-01", "web-02", "web-03", "cache-01", "db-01"]
@@ -296,8 +300,7 @@ pub fn generate() -> Dataset {
             let ys = (0..n)
                 .map(|i| {
                     let t = i as f64 / n as f64 * std::f64::consts::TAU * 2.0;
-                    (base * (1.0 + 0.4 * (t + row as f64).sin())
-                        + (rng.next_unit() - 0.5) * 90.0)
+                    (base * (1.0 + 0.4 * (t + row as f64).sin()) + (rng.next_unit() - 0.5) * 90.0)
                         .max(0.0)
                 })
                 .collect();

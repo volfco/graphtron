@@ -22,18 +22,20 @@ is a deliberate design constraint.
 
 ## Build and test
 
-Host tests cover the geometry core:
+Run the same workspace checks as CI:
 
 ```bash
-cargo test -p graphtron --all-features --locked
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --locked
+cargo test --workspace --all-targets --locked
 ```
 
 Type-check the web layers against WASM:
 
 ```bash
-cargo check -p graphtron --features web --target wasm32-unknown-unknown
-cargo check -p graphtron-dioxus --target wasm32-unknown-unknown
-cargo check -p graphtron-demo --target wasm32-unknown-unknown
+cargo check -p graphtron --features web --target wasm32-unknown-unknown --locked
+cargo check -p graphtron-dioxus --target wasm32-unknown-unknown --locked
+cargo check -p graphtron-demo --target wasm32-unknown-unknown --locked
 ```
 
 Run the demo gallery:
@@ -42,8 +44,11 @@ Run the demo gallery:
 cd crates/graphtron-demo && dx serve --platform web
 ```
 
-The Canvas2D pixel-regression suites need Playwright and a `wasm-bindgen` CLI
-matching `Cargo.lock`; see each crate's README for the exact invocations.
+The Canvas2D pixel-regression suites remain manual. The repository does not pin
+a Node/Playwright package, so CI does not pretend that the browser scripts are
+self-contained gates. Install Playwright with Chromium and a `wasm-bindgen` CLI
+matching `Cargo.lock`, then follow each crate's README for the exact fixture
+build and script invocations.
 
 ## Consuming it
 
