@@ -11,6 +11,9 @@ pub struct CanvasSurface {
     pub css_w: f64,
     pub css_h: f64,
     pub dpr: f64,
+    /// Effective physical-pixel/CSS ratios after backing-store rounding.
+    pub scale_x: f64,
+    pub scale_y: f64,
 }
 
 impl CanvasSurface {
@@ -26,6 +29,8 @@ impl CanvasSurface {
             css_w: 0.0,
             css_h: 0.0,
             dpr: 1.0,
+            scale_x: 1.0,
+            scale_y: 1.0,
         })
     }
 
@@ -33,10 +38,16 @@ impl CanvasSurface {
     /// Compare-before-set: resizing clears the canvas and can trigger layout,
     /// so it must be a no-op when nothing changed.
     pub fn sync_size(&mut self, css_w: f64, css_h: f64) -> bool {
+        if !css_w.is_finite() || !css_h.is_finite() || css_w <= 0.0 || css_h <= 0.0 {
+            return false;
+        }
         let dpr = web_sys::window()
             .map(|w| w.device_pixel_ratio())
             .unwrap_or(1.0)
             .max(1.0);
+        if !dpr.is_finite() {
+            return false;
+        }
         if (css_w, css_h, dpr) == (self.css_w, self.css_h, self.dpr) && self.canvas.width() > 0 {
             return false;
         }
@@ -45,20 +56,25 @@ impl CanvasSurface {
         self.dpr = dpr;
         let pixel_w = (css_w * dpr).round().max(1.0) as u32;
         let pixel_h = (css_h * dpr).round().max(1.0) as u32;
+        self.scale_x = pixel_w as f64 / css_w;
+        self.scale_y = pixel_h as f64 / css_h;
         self.canvas.set_width(pixel_w);
         self.canvas.set_height(pixel_h);
         // The backing store is rounded independently in each dimension. Use
         // the resulting physical/CSS ratios so fractional CSS sizes and DPRs
         // do not leave a partially transformed strip.
-        let _ = self.ctx.set_transform(
-            pixel_w as f64 / css_w,
-            0.0,
-            0.0,
-            pixel_h as f64 / css_h,
-            0.0,
-            0.0,
-        );
+        let _ = self
+            .ctx
+            .set_transform(self.scale_x, 0.0, 0.0, self.scale_y, 0.0, 0.0);
         true
+    }
+
+    pub fn crisp_rect(&self, x: f64, y: f64, w: f64, h: f64) -> (f64, f64, f64, f64) {
+        let sx = (x * self.scale_x).round() / self.scale_x;
+        let sy = (y * self.scale_y).round() / self.scale_y;
+        let ex = ((x + w) * self.scale_x).round() / self.scale_x;
+        let ey = ((y + h) * self.scale_y).round() / self.scale_y;
+        (sx.min(ex), sy.min(ey), (ex - sx).abs(), (ey - sy).abs())
     }
 
     pub fn clear(&self) {

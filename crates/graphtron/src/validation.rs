@@ -38,6 +38,12 @@ pub enum DataIssueKind {
         left: usize,
         right: usize,
     },
+    /// Stacked point series are composed by index and therefore require the
+    /// same x grid as the first series.
+    PointGridMismatch {
+        left: usize,
+        right: usize,
+    },
     NonIncreasingBucket,
     InvertedBand,
     InvalidSegmentRange,
@@ -83,6 +89,10 @@ impl fmt::Display for DataIssue {
             DataIssueKind::HistogramGridMismatch { left, right } => write!(
                 f,
                 "stacked histograms require a shared bucket grid ({left} vs {right} edges)"
+            ),
+            DataIssueKind::PointGridMismatch { left, right } => write!(
+                f,
+                "stacked series require a shared x grid ({left} vs {right} points)"
             ),
             DataIssueKind::NonIncreasingBucket => {
                 write!(f, "histogram bucket boundaries must strictly increase")
@@ -275,6 +285,21 @@ pub(crate) fn validate_chart_data(data: &ChartData) -> Vec<DataIssue> {
                     check_lengths(&mut issues, si, "xs", s.xs.len(), field, len);
                 }
                 check_xs(&mut issues, si, &s.xs);
+                for (field, values) in [
+                    ("center", &s.center),
+                    ("lower", &s.lower),
+                    ("upper", &s.upper),
+                ] {
+                    for (i, value) in values.iter().copied().enumerate() {
+                        if value.is_infinite() {
+                            issues.push(DataIssue {
+                                series: si,
+                                index: Some(i),
+                                kind: DataIssueKind::NonFiniteValue { field },
+                            });
+                        }
+                    }
+                }
                 let n = s.lower.len().min(s.upper.len());
                 for i in 0..n {
                     if s.lower[i].is_finite() && s.upper[i].is_finite() && s.lower[i] > s.upper[i] {
@@ -356,10 +381,29 @@ pub(crate) fn validate_chart_data_for_spec(
     spec: &crate::spec::ChartSpec,
 ) -> Vec<DataIssue> {
     let mut issues = validate_chart_data(data);
-    if matches!(
+    let stacked = matches!(
         spec.layout,
         crate::spec::SeriesLayout::Stacked | crate::spec::SeriesLayout::StackedPercent
-    ) && let ChartData::Histogram(series) = data
+    );
+    if stacked
+        && let ChartData::Bars(series) | ChartData::Areas(series) = data
+        && let Some(first) = series.first()
+    {
+        for (si, current) in series.iter().enumerate().skip(1) {
+            if current.xs != first.xs {
+                issues.push(DataIssue {
+                    series: si,
+                    index: None,
+                    kind: DataIssueKind::PointGridMismatch {
+                        left: first.xs.len(),
+                        right: current.xs.len(),
+                    },
+                });
+            }
+        }
+    }
+    if stacked
+        && let ChartData::Histogram(series) = data
         && let Some(first) = series.first()
     {
         for (si, current) in series.iter().enumerate().skip(1) {
@@ -409,16 +453,20 @@ pub(crate) fn validate_chart_data_for_spec(
         }
         ChartData::Histogram(series) => {
             for (si, s) in series.iter().enumerate() {
-                let mut total = 0.0;
-                report(
-                    si,
-                    &mut s.counts.iter().enumerate().map(|(i, count)| {
-                        if count.is_finite() {
-                            total = crate::series::finite_add(total, *count);
-                        }
-                        (i, total)
-                    }),
-                );
+                if s.cumulative {
+                    let mut total = 0.0;
+                    report(
+                        si,
+                        &mut s.counts.iter().enumerate().map(|(i, count)| {
+                            if count.is_finite() {
+                                total = crate::series::finite_add(total, *count);
+                            }
+                            (i, total)
+                        }),
+                    );
+                } else {
+                    report(si, &mut s.counts.iter().copied().enumerate());
+                }
             }
         }
         ChartData::Band(series) => {
@@ -527,6 +575,22 @@ mod tests {
     }
 
     #[test]
+    fn band_infinite_values_are_reported() {
+        let data = ChartData::Band(vec![crate::series::BandSeries {
+            name: "band".into(),
+            xs: vec![0.0],
+            center: vec![f64::INFINITY],
+            lower: vec![2.0],
+            upper: vec![3.0],
+            color: None,
+        }]);
+        assert!(data.validate().unwrap_err().iter().any(|issue| matches!(
+            issue.kind,
+            DataIssueKind::NonFiniteValue { field: "center" }
+        )));
+    }
+
+    #[test]
     fn log_axis_validation_counts_values_it_will_gap() {
         use crate::series::SeriesData;
         use crate::spec::ChartSpec;
@@ -582,6 +646,49 @@ mod tests {
             data.validate_with(&ChartSpec::hbar(Unit::None).with_log_y())
                 .is_ok()
         );
+    }
+
+    #[test]
+    fn stacked_point_series_report_incompatible_x_grids() {
+        let data = ChartData::Areas(vec![
+            crate::series::SeriesData {
+                name: "a".into(),
+                xs: vec![0.0, 2.0],
+                ys: vec![1.0, 2.0],
+                color: None,
+            },
+            crate::series::SeriesData {
+                name: "b".into(),
+                xs: vec![0.0, 1.0, 2.0],
+                ys: vec![3.0, 4.0, 5.0],
+                color: None,
+            },
+        ]);
+        let mut spec = crate::spec::ChartSpec::area(crate::units::Unit::None);
+        spec.layout = crate::spec::SeriesLayout::Stacked;
+        assert!(
+            data.validate_with(&spec)
+                .unwrap_err()
+                .iter()
+                .any(|issue| matches!(issue.kind, DataIssueKind::PointGridMismatch { .. }))
+        );
+    }
+
+    #[test]
+    fn noncumulative_histogram_log_validation_uses_raw_counts() {
+        let data = ChartData::Histogram(vec![crate::series::HistogramSeries {
+            buckets: vec![0.0, 1.0],
+            counts: vec![0.0, -1.0],
+            cumulative: false,
+            ..Default::default()
+        }]);
+        let mut spec = crate::spec::ChartSpec::histogram(crate::units::Unit::None).with_log_y();
+        spec.layout = crate::spec::SeriesLayout::Grouped;
+        let issues = data.validate_with(&spec).unwrap_err();
+        assert!(issues.iter().any(|issue| matches!(
+            issue.kind,
+            DataIssueKind::NonPositiveOnLogAxis { count: 2, .. }
+        )));
     }
 
     #[test]

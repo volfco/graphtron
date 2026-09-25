@@ -40,6 +40,8 @@ impl Summary {
         let mut scale = 0.0f64;
         let mut scaled_mean = 0.0f64;
         let mut scaled_m2 = 0.0f64;
+        let mut scaled_sum = 0.0f64;
+        let mut scaled_sum_correction = 0.0f64;
         for value in values {
             if !value.is_finite() {
                 continue;
@@ -54,18 +56,31 @@ impl Summary {
                     let factor = scale / next_scale;
                     scaled_mean *= factor;
                     scaled_m2 *= factor * factor;
+                    scaled_sum *= factor;
+                    scaled_sum_correction *= factor;
                     scale = next_scale;
                 }
                 let delta = normalized - scaled_mean;
                 scaled_mean += delta / count as f64;
                 scaled_m2 += delta * (normalized - scaled_mean);
+
+                // Neumaier compensation preserves small residuals that would
+                // otherwise disappear when large positive and negative values
+                // cancel (for example, 1e16 + 1 - 1e16).
+                let next_sum = scaled_sum + normalized;
+                if scaled_sum.abs() >= normalized.abs() {
+                    scaled_sum_correction += (scaled_sum - next_sum) + normalized;
+                } else {
+                    scaled_sum_correction += (normalized - next_sum) + scaled_sum;
+                }
+                scaled_sum = next_sum;
             }
         }
         if count == 0 {
             return None;
         }
         let mean = scaled_mean * scale;
-        let sum = (mean * count as f64).clamp(-f64::MAX, f64::MAX);
+        let sum = ((scaled_sum + scaled_sum_correction) * scale).clamp(-f64::MAX, f64::MAX);
         let stddev = (scaled_m2 / count as f64).sqrt() * scale;
         Some(Self {
             count,
@@ -202,7 +217,14 @@ pub fn exponential_moving_average(values: &[f64], alpha: f64) -> Vec<f64> {
         }
         let next = match accumulator {
             None => *value,
-            Some(previous) => alpha * value + (1.0 - alpha) * previous,
+            Some(previous) => {
+                let delta = value - previous;
+                if delta.is_finite() {
+                    previous + alpha * delta
+                } else {
+                    alpha * value + (1.0 - alpha) * previous
+                }
+            }
         };
         accumulator = Some(next);
         out.push(next);
@@ -258,16 +280,22 @@ pub fn linear_fit(xs: &[f64], ys: &[f64]) -> Option<LinearFit> {
     }
     let mut mean_x = x_summary.mean;
     let mut mean_y = y_summary.mean;
-    let x_fallback = xs[..n]
-        .iter()
-        .filter(|x| x.is_finite())
+    let x_fallback = (0..n)
+        .filter_map(|index| (xs[index].is_finite() && ys[index].is_finite()).then_some(xs[index]))
         .fold(0.0f64, |scale, x| scale.max(x.abs()));
-    let y_fallback = ys[..n]
-        .iter()
-        .filter(|y| y.is_finite())
+    let y_fallback = (0..n)
+        .filter_map(|index| (xs[index].is_finite() && ys[index].is_finite()).then_some(ys[index]))
         .fold(0.0f64, |scale, y| scale.max(y.abs()));
-    if x_fallback == 0.0 || y_fallback == 0.0 {
+    if x_fallback == 0.0 {
         return None;
+    }
+    if y_fallback == 0.0 {
+        return Some(LinearFit {
+            slope: 0.0,
+            intercept: y_summary.mean,
+            r2: 1.0,
+            count: pair_count,
+        });
     }
     // The scaled summary is robust at the extremes, but unscaled Welford has
     // better precision for ordinary large offsets such as epoch timestamps.
@@ -404,6 +432,14 @@ mod tests {
         assert!(smoothed.iter().all(|value| value.is_finite()));
         let fit = linear_fit(&[f64::MAX, f64::MAX / 2.0], &[f64::MAX, f64::MAX / 2.0]).unwrap();
         assert!(fit.slope.is_finite() && fit.r2.is_finite());
+        let flat = linear_fit(&[0.0, 1.0], &[0.0, 0.0]).unwrap();
+        assert_eq!(flat.slope, 0.0);
+        assert_eq!(flat.r2, 1.0);
+        assert!(linear_fit(&[0.0, 0.0, 1.0], &[0.0, 0.0, f64::NAN]).is_none());
+        let compensated = Summary::of_slice(&[1e16, 1.0, -1e16]).unwrap();
+        assert_eq!(compensated.sum, 1.0);
+        let ema = exponential_moving_average(&[f64::MAX, f64::MAX], 0.5);
+        assert!(ema.iter().all(|value| value.is_finite()));
     }
 
     #[test]

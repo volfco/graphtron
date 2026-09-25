@@ -30,9 +30,7 @@ impl PartialEq for Animation {
             && self.to == other.to
             && self.start_ms == other.start_ms
             && self.duration_ms == other.duration_ms
-            && [0.0, 0.25, 0.5, 0.75, 1.0]
-                .iter()
-                .all(|t| (self.easing)(*t) == (other.easing)(*t))
+            && std::ptr::fn_addr_eq(self.easing, other.easing)
     }
 }
 
@@ -160,15 +158,12 @@ mod tests {
     }
 
     #[test]
-    fn easing_equality_compares_more_than_the_midpoint() {
+    fn easing_equality_compares_function_identity() {
         fn quarter(t: f64) -> f64 {
             t * t
         }
-        fn different_midpoint(t: f64) -> f64 {
-            if t == 0.5 { 0.5 } else { quarter(t) }
-        }
         let a = Animation::with_easing(0.0, 1.0, 0.0, 1.0, quarter);
-        let b = Animation::with_easing(0.0, 1.0, 0.0, 1.0, different_midpoint);
+        let b = Animation::with_easing(0.0, 1.0, 0.0, 1.0, crate::easing::ease_out_cubic);
         assert_ne!(a, b);
     }
 

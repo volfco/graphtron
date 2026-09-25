@@ -407,9 +407,9 @@ fn stacked_extent(series: &[crate::series::SeriesData], x0: f64, x1: f64) -> (f6
                 continue;
             }
             if *y >= 0.0 {
-                positive += y;
+                positive = crate::series::finite_add(positive, *y);
             } else {
-                negative += y;
+                negative = crate::series::finite_add(negative, *y);
             }
             any = true;
         }
@@ -459,9 +459,9 @@ fn stacked_area_extent(series: &[crate::series::SeriesData], x0: f64, x1: f64) -
                 continue;
             };
             if value >= 0.0 {
-                positive += value;
+                positive = crate::series::finite_add(positive, value);
             } else {
-                negative += value;
+                negative = crate::series::finite_add(negative, value);
             }
             any = true;
         }
@@ -504,9 +504,9 @@ fn histogram_stacked_extent(series: &[crate::series::HistogramSeries]) -> (f64, 
                 continue;
             };
             if value >= 0.0 {
-                positive += value;
+                positive = crate::series::finite_add(positive, value);
             } else {
-                negative += value;
+                negative = crate::series::finite_add(negative, value);
             }
         }
         lo = lo.min(negative);
@@ -716,10 +716,10 @@ fn positive_extent(
                             .fold((0.0, 0.0), |(positive, negative), values| {
                                 match values.get(bucket).copied() {
                                     Some(value) if value.is_finite() && value >= 0.0 => {
-                                        (positive + value, negative)
+                                        (crate::series::finite_add(positive, value), negative)
                                     }
                                     Some(value) if value.is_finite() => {
-                                        (positive, negative + value.abs())
+                                        (positive, crate::series::finite_add(negative, value.abs()))
                                     }
                                     _ => (positive, negative),
                                 }
@@ -741,9 +741,9 @@ fn positive_extent(
                             };
                         }
                         if value >= 0.0 {
-                            positive += value;
+                            positive = crate::series::finite_add(positive, value);
                         } else {
-                            negative += value;
+                            negative = crate::series::finite_add(negative, value);
                         }
                     }
                     take(positive);
@@ -813,9 +813,9 @@ fn positive_extent(
                             continue;
                         }
                         if *value >= 0.0 {
-                            positive_total += *value;
+                            positive_total = crate::series::finite_add(positive_total, *value);
                         } else {
-                            negative_total += value.abs();
+                            negative_total = crate::series::finite_add(negative_total, value.abs());
                         }
                     }
                     for s in series {
@@ -837,9 +837,9 @@ fn positive_extent(
                             *raw
                         };
                         if value >= 0.0 {
-                            positive += value;
+                            positive = crate::series::finite_add(positive, value);
                         } else {
-                            negative += value;
+                            negative = crate::series::finite_add(negative, value);
                         }
                     }
                     take(positive);
@@ -1234,6 +1234,29 @@ mod tests {
         );
         assert!(layout.y_domain().0.is_finite());
         assert!(layout.y_domain().0 > 0.0);
+    }
+
+    #[test]
+    fn stacked_extremes_saturate_instead_of_losing_the_domain() {
+        let data = crate::spec::ChartData::Bars(vec![
+            crate::series::SeriesData {
+                name: "a".into(),
+                xs: vec![0.0],
+                ys: vec![f64::MAX],
+                color: None,
+            },
+            crate::series::SeriesData {
+                name: "b".into(),
+                xs: vec![0.0],
+                ys: vec![f64::MAX],
+                color: None,
+            },
+        ]);
+        let mut spec = crate::spec::ChartSpec::bars(crate::units::Unit::None);
+        spec.layout = crate::spec::SeriesLayout::Stacked;
+        let (lo, hi) = data_y_domain(&data, 0.0, 1.0, None, None, true, spec.layout);
+        assert!(lo.is_finite() && hi.is_finite());
+        assert_eq!(hi, f64::MAX);
     }
 
     #[test]

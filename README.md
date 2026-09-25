@@ -44,11 +44,10 @@ Run the demo gallery:
 cd crates/graphtron-demo && dx serve --platform web
 ```
 
-The Canvas2D pixel-regression suites remain manual. The repository does not pin
-a Node/Playwright package, so CI does not pretend that the browser scripts are
-self-contained gates. Install Playwright with Chromium and a `wasm-bindgen` CLI
-matching `Cargo.lock`, then follow each crate's README for the exact fixture
-build and script invocations.
+CI also runs the three Canvas2D browser suites with pinned Playwright/Chromium
+and `wasm-bindgen` tooling. For local browser checks, install Playwright with
+Chromium and a `wasm-bindgen` CLI matching `Cargo.lock`, then follow each
+crate's README for the exact fixture build and script invocations.
 
 ## Consuming it
 

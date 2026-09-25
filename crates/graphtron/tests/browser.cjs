@@ -85,7 +85,7 @@ async function render(page, name, w = 400, h = 180, n = 0) {
       const page=await browser.newPage({viewport:{width:850,height:1000},deviceScaleFactor:dpr});
       await page.goto(`http://127.0.0.1:${server.address().port}`);
       await page.waitForFunction(()=>window.ready);
-      const cases=[['grid_only'],['line'],['area'],['area_markers'],['heat',400,100,200],['axis'],['logaxis',400,80],['logstep'],['band_short'],['hist_ragged'],['tiny_labels',80,8],['decorations',280,180,40],['hist'],['hbar'],['ohlc'],['state'],['band'],['tooltip',240,160,10]];
+      const cases=[['grid_only'],['line'],['singleton'],['area'],['area_markers'],['heat',400,100,200],['axis'],['logaxis',400,80],['logstep'],['band_short'],['hist_ragged'],['tiny_labels',80,8],['decorations',280,180,40],['hist'],['hbar'],['ohlc'],['state'],['band'],['tooltip',240,160,10]];
       for (const args of cases) {
         const r=await render(page,...args); results.push(r);
         const name=`${r.name}@${dpr}`;
@@ -106,6 +106,7 @@ async function render(page, name, w = 400, h = 180, n = 0) {
           }
         });
         if (r.name==='line') check(`${name} no frame`,()=>assert(white(r.pixels.border),JSON.stringify(r.pixels.border)));
+        if (r.name==='singleton') check(`${name} draws a visible sample`,()=>assert((r.counts.arc||0)>0,'singleton marker was not drawn'));
         if (r.name.startsWith('area')) {
           check(`${name} no fill above data`,()=>assert(white(r.pixels.top),JSON.stringify(r.pixels.top)));
           check(`${name} fill below data`,()=>assert(!white(r.pixels.low),'area did not fill'));

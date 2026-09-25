@@ -1,6 +1,6 @@
 # Assumptions and Constraints
 
-- CI verification covers every requested Rust host and WASM check; the Playwright scripts remain manual because this repository has no pinned Node/Playwright package.
+- CI verification covers Rust host checks, WASM checks, and the three browser suites with pinned Playwright/Chromium and wasm-bindgen tooling; browser suites may still be skipped only in a local environment where those tools are unavailable.
 - The user wants the full review set implemented, not only the highest-priority blockers.
 - `NaN` remains the supported point-series gap marker; infinities are invalid values and should be reported.
 - Stacked point-series data is expected to share aligned x coordinates; mismatched grids will be rejected at the spec-aware validation boundary rather than silently interpolated.

@@ -631,9 +631,9 @@ fn histogram_stack_tops(
             .copied()
             .fold((0.0, 0.0), |(positive, negative), value| {
                 if value >= 0.0 {
-                    (positive + value, negative)
+                    (crate::series::finite_add(positive, value), negative)
                 } else {
-                    (positive, negative + value.abs())
+                    (positive, crate::series::finite_add(negative, value.abs()))
                 }
             });
     let mut positive = 0.0;
@@ -654,10 +654,10 @@ fn histogram_stack_tops(
                 value
             };
             Some(if value >= 0.0 {
-                positive += value;
+                positive = crate::series::finite_add(positive, value);
                 positive
             } else {
-                negative += value;
+                negative = crate::series::finite_add(negative, value);
                 negative
             })
         })
@@ -708,9 +708,9 @@ fn hit_test_composed_series(
             continue;
         };
         if value >= 0.0 {
-            positive_total += value;
+            positive_total = crate::series::finite_add(positive_total, value);
         } else {
-            negative_total += value.abs();
+            negative_total = crate::series::finite_add(negative_total, value.abs());
         }
     }
 
@@ -747,10 +747,10 @@ fn hit_test_composed_series(
             raw
         };
         let top = if drawn >= 0.0 {
-            positive += drawn;
+            positive = crate::series::finite_add(positive, drawn);
             positive
         } else {
-            negative += drawn;
+            negative = crate::series::finite_add(negative, drawn);
             negative
         };
         let px = layout.x_scale.to_px(x);

@@ -8,8 +8,9 @@ pub struct Rgba {
     pub r: u8,
     pub g: u8,
     pub b: u8,
-    /// Alpha in [0, 1].
-    pub a: f64,
+    /// Alpha in [0, 1]. Kept private so invalid CSS alpha values cannot enter
+    /// through a public struct literal.
+    a: f64,
 }
 
 impl Rgba {
@@ -39,6 +40,10 @@ impl Rgba {
 
     pub const fn with_alpha(self, a: f64) -> Self {
         Self::new(self.r, self.g, self.b, a)
+    }
+
+    pub const fn alpha(self) -> f64 {
+        self.a
     }
 
     /// CSS color string. Fully-opaque colors use the compact `#rrggbb` form.

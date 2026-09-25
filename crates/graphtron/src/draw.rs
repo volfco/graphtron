@@ -1,4 +1,4 @@
-use crate::canvas::{CanvasSurface, crisp_rect_at_dpr, crisp_stroke_geometry};
+use crate::canvas::{CanvasSurface, crisp_stroke_geometry};
 use crate::color::{HeatmapColorScale, Rgba, heatmap_color_for_value};
 use crate::curve::{PathOp, line_path};
 use crate::hit::HoverInfo;
@@ -337,11 +337,15 @@ const AXIS_FONT: &str = "10px 'JetBrains Mono', monospace";
 const MIN_LABEL_SPACING_PX: f64 = 16.0;
 
 fn crisp_for(surface: &CanvasSurface, value: f64, width: f64) -> f64 {
-    crisp_stroke_geometry(value, surface.dpr, width).0
+    crisp_stroke_geometry(value, surface.scale_x, width).0
+}
+
+fn crisp_for_y(surface: &CanvasSurface, value: f64, width: f64) -> f64 {
+    crisp_stroke_geometry(value, surface.scale_y, width).0
 }
 
 fn crisp_width(surface: &CanvasSurface, width: f64) -> f64 {
-    crisp_stroke_geometry(0.0, surface.dpr, width).1
+    crisp_stroke_geometry(0.0, surface.scale_x, width).1
 }
 
 /// Keep every k-th tick so adjacent kept ticks are at least `min_px` apart.
@@ -431,7 +435,7 @@ fn summarize(values: impl Iterator<Item = f64>, stats: &[LegendStat], unit: Unit
     for value in values.filter(|value| value.is_finite()) {
         min = min.min(value);
         max = max.max(value);
-        total += value;
+        total = crate::series::finite_add(total, value);
         last = value;
         count += 1;
     }
@@ -1912,9 +1916,9 @@ fn highlight_candidates(
                         .filter(|value| value.is_finite())
                         .fold((0.0, 0.0), |(positive, negative), value| {
                             if value >= 0.0 {
-                                (positive + value, negative)
+                                (crate::series::finite_add(positive, value), negative)
                             } else {
-                                (positive, negative + value.abs())
+                                (positive, crate::series::finite_add(negative, value.abs()))
                             }
                         });
                     let mut positive = 0.0;
@@ -1939,10 +1943,10 @@ fn highlight_candidates(
                             raw
                         };
                         let top = if drawn >= 0.0 {
-                            positive += drawn;
+                            positive = crate::series::finite_add(positive, drawn);
                             positive
                         } else {
-                            negative += drawn;
+                            negative = crate::series::finite_add(negative, drawn);
                             negative
                         };
                         pool.push(
@@ -2047,10 +2051,10 @@ fn push_stacked_column_candidates(
                 continue;
             };
             if value >= 0.0 {
-                positive += value;
+                positive = crate::series::finite_add(positive, value);
                 positive_color = Some(series_color(s, index));
             } else {
-                negative += value;
+                negative = crate::series::finite_add(negative, value);
                 negative_color = Some(series_color(s, index));
             }
         }
@@ -2214,8 +2218,8 @@ fn visible_stack_indices(
         }
         let (positive_total, negative_total) = series.iter().fold((0.0, 0.0), |(p, n), row| {
             match row.ys.get(index).copied().filter(|v| v.is_finite()) {
-                Some(value) if value >= 0.0 => (p + value, n),
-                Some(value) => (p, n + value.abs()),
+                Some(value) if value >= 0.0 => (crate::series::finite_add(p, value), n),
+                Some(value) => (p, crate::series::finite_add(n, value.abs())),
                 None => (p, n),
             }
         });
@@ -2235,10 +2239,10 @@ fn visible_stack_indices(
                 };
             }
             let boundary = if value >= 0.0 {
-                positive += value;
+                positive = crate::series::finite_add(positive, value);
                 positive
             } else {
-                negative += value;
+                negative = crate::series::finite_add(negative, value);
                 negative
             };
             let slot = series_index * 2 + usize::from(value < 0.0);
@@ -2358,9 +2362,9 @@ fn normalize_percent(series: &[SeriesData]) -> Vec<SeriesData> {
                 .filter(|y| y.is_finite())
                 .fold((0.0, 0.0), |(positive, negative), value| {
                     if *value >= 0.0 {
-                        (positive + *value, negative)
+                        (crate::series::finite_add(positive, *value), negative)
                     } else {
-                        (positive, negative + value.abs())
+                        (positive, crate::series::finite_add(negative, value.abs()))
                     }
                 })
         })
@@ -2588,7 +2592,7 @@ fn draw_grid(
         vec![]
     };
     for t in &y_ticks {
-        let y = crisp_for(surface, layout.y_px(*t), 1.0);
+        let y = crisp_for_y(surface, layout.y_px(*t), 1.0);
         if y < plot.y - 0.5 || y > plot.y + plot.h + 0.5 {
             continue;
         }
@@ -2657,7 +2661,7 @@ fn draw_grid(
         ctx.set_text_align("right");
         ctx.set_text_baseline("middle");
         for t in &y_ticks {
-            let y = crisp_for(surface, layout.y_px(*t), 1.0);
+            let y = crisp_for_y(surface, layout.y_px(*t), 1.0);
             if y < plot.y - 0.5 || y > plot.y + plot.h + 0.5 {
                 continue;
             }
@@ -3041,8 +3045,7 @@ fn draw_heatmap(
             // CSS pixel. Device snapping may collapse a subpixel cell to zero
             // width; skipping that cell preserves shared boundaries instead
             // of expanding it and overlapping its neighbor.
-            let (rx, _, rw, _) =
-                crisp_rect_at_dpr(px - cell_w / 2.0, 0.0, cell_w, 1.0, surface.dpr);
+            let (rx, _, rw, _) = surface.crisp_rect(px - cell_w / 2.0, 0.0, cell_w, 1.0);
             if rw <= 0.0 {
                 continue;
             }
@@ -3179,7 +3182,7 @@ fn draw_ohlc(
             let body_h = (body_bot - body_top).max(1.0);
             ctx.set_fill_style_str(candle_color);
             let (rx, ry, rw, rh) =
-                crisp_rect_at_dpr(cx - candle_w / 2.0, body_top, candle_w, body_h, surface.dpr);
+                surface.crisp_rect(cx - candle_w / 2.0, body_top, candle_w, body_h);
             ctx.fill_rect(rx, ry, rw, rh);
         }
     }
@@ -3311,6 +3314,7 @@ fn draw_histogram(
                     let left = x0.min(x1) + si as f64 * sub_width + 0.5;
                     draw_histogram_rect(
                         ctx,
+                        surface,
                         layout,
                         left,
                         (sub_width - 1.0).max(1.0),
@@ -3318,7 +3322,6 @@ fn draw_histogram(
                         value,
                         histogram_color(series, si),
                         config,
-                        surface.dpr,
                     );
                 }
             }
@@ -3345,9 +3348,9 @@ fn draw_histogram(
                     .filter(|v| v.is_finite())
                     .fold((0.0, 0.0), |(positive, negative), value| {
                         if value >= 0.0 {
-                            (positive + value, negative)
+                            (crate::series::finite_add(positive, value), negative)
                         } else {
-                            (positive, negative + value.abs())
+                            (positive, crate::series::finite_add(negative, value.abs()))
                         }
                     });
                 let mut positive = 0.0;
@@ -3368,15 +3371,16 @@ fn draw_histogram(
                     }
                     let (base, top) = if value >= 0.0 {
                         let base = positive;
-                        positive += value;
+                        positive = crate::series::finite_add(positive, value);
                         (base, positive)
                     } else {
                         let base = negative;
-                        negative += value;
+                        negative = crate::series::finite_add(negative, value);
                         (base, negative)
                     };
                     draw_histogram_rect(
                         ctx,
+                        surface,
                         layout,
                         layout.x_scale.to_px(x0.min(x1)) + 0.5,
                         ((layout.x_scale.to_px(x1) - layout.x_scale.to_px(x0)).abs() - 1.0)
@@ -3385,7 +3389,6 @@ fn draw_histogram(
                         top,
                         histogram_color(series, si),
                         config,
-                        surface.dpr,
                     );
                 }
                 let _ = edge_series; // documents that bucket geometry comes from one coherent edge pair.
@@ -3407,6 +3410,7 @@ fn histogram_color(series: &HistogramSeries, index: usize) -> u32 {
 #[allow(clippy::too_many_arguments)] // Geometry values are intentionally explicit at call sites.
 fn draw_histogram_rect(
     ctx: &web_sys::CanvasRenderingContext2d,
+    surface: &CanvasSurface,
     layout: &ChartLayout,
     x: f64,
     width: f64,
@@ -3414,7 +3418,6 @@ fn draw_histogram_rect(
     top: f64,
     color: u32,
     config: &DrawConfig,
-    dpr: f64,
 ) {
     if base == top || !base.is_finite() || !top.is_finite() {
         return;
@@ -3438,7 +3441,7 @@ fn draw_histogram_rect(
     } else {
         ctx.set_fill_style_str(&format!("rgba({r},{g},{b},0.85)"));
     }
-    let (rx, ry, rw, rh) = crisp_rect_at_dpr(x, y, width, h, dpr);
+    let (rx, ry, rw, rh) = surface.crisp_rect(x, y, width, h);
     ctx.fill_rect(rx, ry, rw, rh);
     ctx.set_shadow_color("transparent");
     ctx.set_shadow_blur(0.0);
@@ -3527,7 +3530,7 @@ fn draw_hbar(
             } else {
                 ctx.set_fill_style_str(&format!("rgba({r},{g},{b},0.85)"));
             }
-            let (rx, ry, rw, rh) = crisp_rect_at_dpr(x, bar_top, w, sub_h.max(1.0), surface.dpr);
+            let (rx, ry, rw, rh) = surface.crisp_rect(x, bar_top, w, sub_h.max(1.0));
             ctx.fill_rect(rx, ry, rw, rh);
 
             ctx.set_shadow_color("transparent");
@@ -3593,11 +3596,11 @@ fn draw_bar_column(
         let px = layout.x_scale.to_px(*x);
         let (base, top) = if *y >= 0.0 {
             let base = positive;
-            positive += *y;
+            positive = crate::series::finite_add(positive, *y);
             (base, positive)
         } else {
             let base = negative;
-            negative += *y;
+            negative = crate::series::finite_add(negative, *y);
             (base, negative)
         };
         let base_px = layout.y_edge_px(base);
@@ -3621,7 +3624,7 @@ fn draw_bar_column(
         } else {
             ctx.set_fill_style_str(&format!("rgba({r},{g},{b},0.85)"));
         }
-        let (rx, ry, rw, rh) = crisp_rect_at_dpr(px - bar_w / 2.0, bar_top, bar_w, h, surface.dpr);
+        let (rx, ry, rw, rh) = surface.crisp_rect(px - bar_w / 2.0, bar_top, bar_w, h);
         ctx.fill_rect(rx, ry, rw, rh);
         ctx.set_shadow_color("transparent");
         ctx.set_shadow_blur(0.0);
@@ -3971,7 +3974,7 @@ fn draw_state_timeline(
             let Some(cell) = crate::hit::state_cell(layout, series.len(), ri, seg) else {
                 continue;
             };
-            let (rx, ry, rw, rh) = crisp_rect_at_dpr(cell.x, cell.y, cell.w, cell.h, surface.dpr);
+            let (rx, ry, rw, rh) = surface.crisp_rect(cell.x, cell.y, cell.w, cell.h);
             ctx.set_fill_style_str(&css_color(seg.color));
             ctx.fill_rect(rx, ry, rw, rh);
         }
@@ -4012,9 +4015,9 @@ fn draw_stacked_areas(
                 .filter(|y| y.is_finite())
                 .fold((0.0, 0.0), |(positive, negative), value| {
                     if *value >= 0.0 {
-                        (positive + *value, negative)
+                        (crate::series::finite_add(positive, *value), negative)
                     } else {
-                        (positive, negative + value.abs())
+                        (positive, crate::series::finite_add(negative, value.abs()))
                     }
                 })
         })
@@ -4058,11 +4061,11 @@ fn draw_stacked_areas(
             };
             let (base, next) = if value >= 0.0 {
                 let base = positive[visible_index];
-                positive[visible_index] += value;
+                positive[visible_index] = crate::series::finite_add(positive[visible_index], value);
                 (base, positive[visible_index])
             } else {
                 let base = negative[visible_index];
-                negative[visible_index] += value;
+                negative[visible_index] = crate::series::finite_add(negative[visible_index], value);
                 (base, negative[visible_index])
             };
             lower[visible_index] = Some(base);
@@ -4222,7 +4225,7 @@ fn draw_grouped_bars(
             let h = (zero - top).abs().max(1.0);
             let bar_x = px - group_w / 2.0 + si as f64 * sub_w;
             let (rx, ry, rw, rh) =
-                crisp_rect_at_dpr(bar_x, top.min(zero), (sub_w - 1.0).max(1.0), h, surface.dpr);
+                surface.crisp_rect(bar_x, top.min(zero), (sub_w - 1.0).max(1.0), h);
             ctx.fill_rect(rx, ry, rw, rh);
         }
         ctx.set_shadow_color("transparent");
@@ -4400,7 +4403,7 @@ pub fn draw_overlay(
         && let Some(value) = info.values.first()
         && let Some(crate::partition::Shape::Tile(cell)) = value.shape
     {
-        let (x, y, w, h) = crisp_rect_at_dpr(cell.x, cell.y, cell.w, cell.h, surface.dpr);
+        let (x, y, w, h) = surface.crisp_rect(cell.x, cell.y, cell.w, cell.h);
         ctx.save();
         ctx.begin_path();
         ctx.rect(plot.x, plot.y, plot.w, plot.h);
@@ -4458,8 +4461,8 @@ pub fn draw_overlay(
                     ctx.set_line_width(crisp_width(surface, 1.0));
                     set_line_dash_from_vec(ctx, &[3.0, 3.0]);
                     ctx.begin_path();
-                    ctx.move_to(plot.x, crisp_for(surface, py, 1.0));
-                    ctx.line_to(value.px, crisp_for(surface, py, 1.0));
+                    ctx.move_to(plot.x, crisp_for_y(surface, py, 1.0));
+                    ctx.line_to(value.px, crisp_for_y(surface, py, 1.0));
                     ctx.stroke();
                     clear_line_dash(ctx);
                     if overlay.show_axis_values
@@ -4490,10 +4493,10 @@ pub fn draw_overlay(
             ));
             set_line_dash_from_vec(ctx, &[3.0, 3.0]);
             ctx.begin_path();
-            ctx.move_to(plot.x, crisp_for(surface, value.py, 1.0));
+            ctx.move_to(plot.x, crisp_for_y(surface, value.py, 1.0));
             ctx.line_to(
                 value.px.clamp(plot.x, plot.x + plot.w),
-                crisp_for(surface, value.py, 1.0),
+                crisp_for_y(surface, value.py, 1.0),
             );
             ctx.stroke();
             clear_line_dash(ctx);
@@ -4525,8 +4528,8 @@ pub fn draw_overlay(
         ctx.set_line_width(crisp_width(surface, 1.0));
         set_line_dash_from_vec(ctx, &[2.0, 4.0]);
         ctx.begin_path();
-        ctx.move_to(plot.x, crisp_for(surface, py, 1.0));
-        ctx.line_to(plot.x + plot.w, crisp_for(surface, py, 1.0));
+        ctx.move_to(plot.x, crisp_for_y(surface, py, 1.0));
+        ctx.line_to(plot.x + plot.w, crisp_for_y(surface, py, 1.0));
         ctx.stroke();
         clear_line_dash(ctx);
         if let Some(info) = hover_info
@@ -4728,7 +4731,12 @@ fn draw_y_axis_badge(
     ctx.fill_rect(x, y, w, h);
     ctx.set_stroke_style_str(&css_color(color));
     ctx.set_line_width(crisp_width(surface, 1.0));
-    ctx.stroke_rect(crisp_for(surface, x, 1.0), crisp_for(surface, y, 1.0), w, h);
+    ctx.stroke_rect(
+        crisp_for(surface, x, 1.0),
+        crisp_for_y(surface, y, 1.0),
+        w,
+        h,
+    );
     ctx.set_fill_style_str(&opts.theme.text.to_css());
     ctx.set_text_align("center");
     ctx.set_text_baseline("middle");
@@ -4756,7 +4764,12 @@ fn draw_x_axis_badge(
     ctx.fill_rect(x, y, w, h);
     ctx.set_stroke_style_str(&opts.theme.frozen_line.to_css());
     ctx.set_line_width(crisp_width(surface, 1.0));
-    ctx.stroke_rect(crisp_for(surface, x, 1.0), crisp_for(surface, y, 1.0), w, h);
+    ctx.stroke_rect(
+        crisp_for(surface, x, 1.0),
+        crisp_for_y(surface, y, 1.0),
+        w,
+        h,
+    );
     ctx.set_fill_style_str(&opts.theme.text.to_css());
     ctx.set_text_align("center");
     ctx.set_text_baseline("middle");
@@ -4830,8 +4843,8 @@ fn draw_annotation(
         }
 
         ctx.begin_path();
-        ctx.move_to(plot.x, crisp_for(surface, y0_px, 1.0));
-        ctx.line_to(plot.x + plot.w, crisp_for(surface, y0_px, 1.0));
+        ctx.move_to(plot.x, crisp_for_y(surface, y0_px, 1.0));
+        ctx.line_to(plot.x + plot.w, crisp_for_y(surface, y0_px, 1.0));
         ctx.stroke();
         clear_line_dash(ctx);
 
@@ -5183,8 +5196,8 @@ fn draw_reference_lines(
         ctx.set_line_width(crisp_width(surface, 1.0));
         set_line_dash_from_vec(ctx, &[6.0, 4.0]);
         ctx.begin_path();
-        ctx.move_to(plot.x, crisp_for(surface, py, 1.0));
-        ctx.line_to(plot.x + plot.w, crisp_for(surface, py, 1.0));
+        ctx.move_to(plot.x, crisp_for_y(surface, py, 1.0));
+        ctx.line_to(plot.x + plot.w, crisp_for_y(surface, py, 1.0));
         ctx.stroke();
         clear_line_dash(ctx);
         if !spec.reference_lines.show_labels {

@@ -77,6 +77,7 @@ pub enum DragMode {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum Action {
     Hover(f64),
     ClearHover,
@@ -168,7 +169,17 @@ impl InteractState {
         }
     }
 
-    pub fn on_mouse_up(&mut self, x_px: f64, layout: &ChartLayout, mode: DragMode) -> Vec<Action> {
+    /// Complete a click/drag using the historical default zoom mode.
+    pub fn on_mouse_up(&mut self, x_px: f64, layout: &ChartLayout) -> Vec<Action> {
+        self.on_mouse_up_with_mode(x_px, layout, DragMode::Zoom)
+    }
+
+    pub fn on_mouse_up_with_mode(
+        &mut self,
+        x_px: f64,
+        layout: &ChartLayout,
+        mode: DragMode,
+    ) -> Vec<Action> {
         self.on_mouse_up_with_min_span(x_px, layout, mode, MIN_ZOOM_SPAN_MS)
     }
 
@@ -229,7 +240,7 @@ impl InteractState {
     }
 
     pub fn on_touch_end(&mut self, x_px: f64, layout: &ChartLayout) -> Vec<Action> {
-        self.on_mouse_up(x_px, layout, DragMode::Zoom)
+        self.on_mouse_up_with_mode(x_px, layout, DragMode::Zoom)
     }
 
     /// Handle pinch-to-zoom from two touch points.
@@ -415,7 +426,7 @@ mod tests {
         let l = layout();
         let mut s = InteractState::default();
         s.on_mouse_down(100.0);
-        let actions = s.on_mouse_up(102.0, &l, DragMode::Zoom);
+        let actions = s.on_mouse_up_with_mode(102.0, &l, DragMode::Zoom);
         assert!(matches!(actions[..], [Action::ToggleFreeze(_)]));
         assert_eq!(s, InteractState::Idle);
     }
@@ -426,7 +437,7 @@ mod tests {
         let mut s = InteractState::default();
         s.on_mouse_down(100.0);
         s.on_mouse_move(300.0, &l);
-        let actions = s.on_mouse_up(300.0, &l, DragMode::Zoom);
+        let actions = s.on_mouse_up_with_mode(300.0, &l, DragMode::Zoom);
         assert!(
             actions
                 .iter()
@@ -440,7 +451,7 @@ mod tests {
         let mut s = InteractState::default();
         s.on_mouse_down(300.0);
         s.on_mouse_move(100.0, &l);
-        let actions = s.on_mouse_up(100.0, &l, DragMode::Pan);
+        let actions = s.on_mouse_up_with_mode(100.0, &l, DragMode::Pan);
         assert!(actions.iter().any(|a| matches!(a, Action::PanBy(_))));
     }
 
@@ -450,7 +461,7 @@ mod tests {
         let mut s = InteractState::default();
         s.on_mouse_down(300.0);
         s.on_mouse_move(100.0, &l);
-        let actions = s.on_mouse_up(100.0, &l, DragMode::Zoom);
+        let actions = s.on_mouse_up_with_mode(100.0, &l, DragMode::Zoom);
         let zoom = actions
             .iter()
             .find_map(|a| match a {
@@ -561,7 +572,7 @@ mod tests {
         let mut state = InteractState::default();
         state.on_mouse_down(100.0);
         state.on_mouse_move(200.0, &l);
-        let actions = state.on_mouse_up(350.0, &l, DragMode::Zoom);
+        let actions = state.on_mouse_up_with_mode(350.0, &l, DragMode::Zoom);
         let end = actions.iter().find_map(|action| match action {
             Action::ZoomTo { to_ms, .. } => Some(*to_ms),
             _ => None,

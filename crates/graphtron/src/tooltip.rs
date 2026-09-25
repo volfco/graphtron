@@ -63,7 +63,6 @@ mod web {
     struct TooltipMetrics {
         w: f64,
         h: f64,
-        value_w: f64,
     }
 
     impl TooltipMetrics {
@@ -88,7 +87,6 @@ mod web {
                 .unwrap_or(100.0);
 
             let mut max_row_w: f64 = 0.0;
-            let mut value_w: f64 = 0.0;
             let mut row_count = 0usize;
             for &index in indices {
                 let v = &info.values[index];
@@ -97,11 +95,6 @@ mod web {
                     .clone()
                     .unwrap_or_else(|| unit.format(v.y));
                 let row_text = format!("{}  {}", v.name, val_text);
-                value_w = value_w.max(
-                    ctx.measure_text(&val_text)
-                        .map(|m| m.width())
-                        .unwrap_or(40.0),
-                );
                 let w = ctx
                     .measure_text(&row_text)
                     .map(|m| m.width())
@@ -148,7 +141,6 @@ mod web {
             Self {
                 w,
                 h: h.min(available_h.max(1.0)),
-                value_w,
             }
         }
     }
@@ -361,11 +353,13 @@ mod web {
                 .unwrap_or_else(|| unit.format(v.y));
             let value_x = tx + metrics.w - TOOLTIP_PAD;
             let name_x = swatch_x + TOOLTIP_SWATCH + TOOLTIP_SWATCH_GAP;
-            let name_max = (value_x - name_x - metrics.value_w - 8.0).max(0.0);
+            let value_text = ellipsize(ctx, &val_text, (metrics.w - TOOLTIP_PAD * 2.0).max(0.0));
+            let value_width = ctx.measure_text(&value_text).map_or(0.0, |m| m.width());
+            let name_max = (value_x - name_x - value_width - 8.0).max(0.0);
             let name = ellipsize(ctx, &v.name, name_max);
             let _ = ctx.fill_text(&name, name_x, y);
             ctx.set_text_align("right");
-            let _ = ctx.fill_text(&val_text, value_x, y);
+            let _ = ctx.fill_text(&value_text, value_x, y);
             ctx.set_text_align("left");
 
             // Render extra OHLC fields on subsequent lines

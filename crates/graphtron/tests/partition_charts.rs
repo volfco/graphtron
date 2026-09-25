@@ -88,7 +88,14 @@ fn invalid_weights_are_reported_and_cannot_create_invalid_geometry() {
     let data = ChartData::Pie(items(&[0.0, -1.0, f64::NAN, f64::INFINITY]));
     assert!(data.is_empty());
     assert_eq!(data.validate().unwrap_err().len(), 3);
-    assert!(geometry(data.kind(), graphtron::partition::items(&data).unwrap(), plot()).is_empty());
+    assert!(
+        geometry(
+            data.kind(),
+            graphtron::partition::items(&data).unwrap(),
+            plot()
+        )
+        .is_empty()
+    );
     let tiny = Rect {
         w: 0.01,
         h: 0.01,

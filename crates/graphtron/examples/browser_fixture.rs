@@ -174,6 +174,7 @@ pub fn render(
             ChartData::Areas(vec![s(vec![10., 50., 90.], vec![2., 2., 2.])])
         }
         "line" => ChartData::Lines(vec![s(vec![10., 50., 90.], vec![2., 2., 2.])]),
+        "singleton" => ChartData::Lines(vec![s(vec![50.], vec![5.])]),
         "band_short" => ChartData::Band(vec![BandSeries {
             name: "band".into(),
             xs: vec![10., 90.],

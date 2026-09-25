@@ -209,8 +209,11 @@ pub fn time_ticks(from_ms: i64, to_ms: i64, max_ticks: usize) -> Vec<TimeTick> {
     }
     // Do the span arithmetic in i128: a valid i64 domain can be wider than
     // i64::MAX, and `to - from`/`t += step` must not wrap into an endless loop.
+    // A caller-controlled budget must not turn one display query into millions
+    // of labels, so cap it consistently with `linear_ticks`.
+    let budget = max_ticks.clamp(1, 1_024);
     let span = to_ms as i128 - from_ms as i128;
-    let target = span / max_ticks.max(1) as i128;
+    let target = span / budget as i128;
     let step = TIME_STEPS_MS
         .iter()
         .copied()
@@ -232,10 +235,8 @@ pub fn time_ticks(from_ms: i64, to_ms: i64, max_ticks: usize) -> Vec<TimeTick> {
     let first = (from_ms as i128).div_euclid(step) * step;
     let mut ticks = Vec::new();
     let mut t = first;
-    let limit = (to_ms as i128).min((from_ms as i128) + step * max_ticks as i128);
-    // A malicious/very large range must still be bounded even when the time
-    // ladder cannot provide a step large enough to cover it.
-    let output_limit = max_ticks.saturating_add(2);
+    let limit = (to_ms as i128).min((from_ms as i128) + step * budget as i128);
+    let output_limit = budget + 2;
     while t <= limit && ticks.len() < output_limit {
         if t >= from_ms as i128
             && let Ok(ms) = i64::try_from(t)
@@ -407,6 +408,7 @@ mod tests {
         let ticks = time_ticks(i64::MIN, i64::MAX, 8);
         assert!(ticks.len() <= 10, "unbounded time ticks: {}", ticks.len());
         assert!(ticks.windows(2).all(|pair| pair[0].ms < pair[1].ms));
+        assert!(time_ticks(0, i64::MAX, usize::MAX).len() <= 1_026);
     }
 
     #[test]

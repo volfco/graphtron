@@ -87,9 +87,9 @@ fn values(
             .get(index)
             .filter(|v| v.is_finite() && (**v >= 0.0) == (raw >= 0.0))
         {
-            total += v.abs();
+            total = crate::series::finite_add(total, v.abs());
             if j < si {
-                base += v;
+                base = crate::series::finite_add(base, *v);
             }
         }
     }
@@ -98,7 +98,11 @@ fn values(
     } else {
         1.0
     };
-    Some((raw, base * factor, (base + raw) * factor))
+    Some((
+        raw,
+        base * factor,
+        crate::series::finite_add(base * factor, raw * factor),
+    ))
 }
 
 /// Staircase-aware hover for this presentation. No data cloning or full scan.
@@ -376,6 +380,8 @@ fn paint_series(
     let fill = matches!(data, ChartData::Areas(_)) && !style.line_series.contains(&si);
     ctx.begin_path();
     let mut previous: Option<(f64, f64, f64)> = None;
+    let mut drawable = 0usize;
+    let mut singleton = None;
     for i in indices {
         let Some((_, base, top)) = vals[i] else {
             // A step sample owns the interval up to the next timestamp,
@@ -408,6 +414,8 @@ fn paint_series(
             previous = None;
             continue;
         }
+        drawable += 1;
+        singleton = Some((x, y));
         if let Some((px, py, pb)) = previous {
             if fill {
                 ctx.move_to(px, pb);
@@ -424,6 +432,14 @@ fn paint_series(
             }
         }
         previous = Some((x, y, bottom));
+    }
+    if drawable == 1
+        && let Some((x, y)) = singleton
+    {
+        ctx.begin_path();
+        let _ = ctx.arc(x, y, 1.5, 0.0, std::f64::consts::TAU);
+        ctx.fill();
+        return;
     }
     if fill {
         ctx.fill();
@@ -736,6 +752,14 @@ mod tests {
         );
         let hit = hit_test(&layout, &spec, &data, &style, layout.x_scale.to_px(50.0)).unwrap();
         assert!((hit.values[0].y - 10.0).abs() < 1e-8);
+    }
+
+    #[test]
+    fn extreme_stacks_saturate_without_non_finite_hover_geometry() {
+        let data = ChartData::Areas(vec![s(vec![f64::MAX]), s(vec![f64::MAX])]);
+        let spec = ChartSpec::area(Unit::None);
+        let (_, _, top) = values(&data, &spec, &RrdOptions::default(), 1, 0).unwrap();
+        assert_eq!(top, f64::MAX);
     }
 
     #[test]

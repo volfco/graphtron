@@ -37,6 +37,8 @@ struct ChartLocals {
     /// Active touch contacts and their current pinch baseline, keyed by the
     /// browser's stable pointer ID.
     touch: TouchPinch,
+    /// Drag mode is selected on pointer-down and retained through pointer-up.
+    drag_mode: DragMode,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -217,6 +219,7 @@ pub fn GraphtronChart(
             cursor_display_ts: None,
             hover_pointer: None,
             touch: TouchPinch::default(),
+            drag_mode: DragMode::Zoom,
         }))
     });
 
@@ -235,10 +238,19 @@ pub fn GraphtronChart(
     // longer data set are removed when data changes so they cannot affect
     // filtered renderer options or unexpectedly reappear after data grows.
     let hidden: Signal<HashSet<usize>> = use_signal(HashSet::new);
-    let active_hidden = use_memo(move || reconcile_hidden(&hidden(), series_count(&data())));
+    let hidden_signature = use_hook(|| RefCell::new(None::<Vec<String>>));
+    let active_hidden = use_memo(move || {
+        let data_now = data();
+        let signature = data_signature(&data_now);
+        let mut previous = hidden_signature.borrow_mut();
+        if previous.as_ref() != Some(&signature) {
+            *previous = Some(signature);
+            return HashSet::new();
+        }
+        reconcile_hidden(&hidden(), series_count(&data_now))
+    });
     {
         let mut hidden = hidden;
-        let active_hidden = active_hidden;
         use_effect(move || {
             let next = active_hidden();
             if *hidden.peek() != next {
@@ -292,8 +304,10 @@ pub fn GraphtronChart(
     let mut inspector_expanded = use_signal(|| false);
     const TOOLTIP_PAGE_SIZE: usize = 16;
 
-    let legend_entries =
-        use_memo(move || legend_entries_for_data(&data(), dom_legend_format, spec.unit));
+    // Legend formatting and units are ordinary props, not signals. Compute
+    // this small index on component renders so prop-only changes cannot leave
+    // stale labels behind a data-only memo.
+    let legend_entries = legend_entries_for_data(&data(), dom_legend_format, spec.unit);
 
     // The effective domain: external precise signal, legacy time range,
     // interaction-local domain, then autofit.
@@ -308,7 +322,7 @@ pub fn GraphtronChart(
         if let Some(d) = local_domain() {
             return d;
         }
-        data_x_domain(&data.peek()).unwrap_or((0.0, 60_000.0))
+        (*display_extent.peek()).unwrap_or((0.0, 60_000.0))
     };
 
     // Domain writes preserve precision internally and through the optional
@@ -359,8 +373,6 @@ pub fn GraphtronChart(
         let locals = locals.clone();
         let spec = draw_spec;
         let options = options.clone();
-        let active_hidden = active_hidden;
-        let display_extent = display_extent;
         let mut anim = anim;
         let mut last_drawn_domain = last_drawn_domain;
         use_effect(move || {
@@ -449,10 +461,22 @@ pub fn GraphtronChart(
         let locals = locals.clone();
         let spec = spec.clone();
         let options = options.clone();
-        let active_hidden = active_hidden;
         let annotations = annotations.clone();
         use_effect(move || {
             let cur = cursor();
+            // Subscribe to the same data and viewport sources as the data
+            // layer; peek() below avoids cloning dense data on every cursor
+            // frame while still repainting after a range, legend, or data
+            // change.
+            let _ = display_data.read();
+            let _ = active_hidden.read();
+            if let Some(domain) = domain {
+                let _ = domain();
+            }
+            if let Some(range) = range {
+                let _ = range();
+            }
+            let _ = local_domain();
             let _ = overlay_tick();
             let _ = redraw_tick();
 
@@ -724,7 +748,7 @@ pub fn GraphtronChart(
                         .or_else(|| default_range.map(|(from, to)| (from as f64, to as f64)))
                         .or_else(|| {
                             (domain.is_none() && range.is_none())
-                                .then(|| data_x_domain(&data.peek()))
+                                .then(|| *display_extent.peek())
                                 .flatten()
                         })
                         .and_then(|(f, t)| constrain_domain(f, t));
@@ -750,7 +774,7 @@ pub fn GraphtronChart(
                         // Back to autofit.
                         let mut local_domain = local_domain;
                         local_domain.set(None);
-                        if let Some((f, t)) = data_x_domain(&data.peek()) {
+                        if let Some((f, t)) = *display_extent.peek() {
                             if let Some(cb) = &on_domain_change {
                                 cb.call((f, t));
                             }
@@ -761,6 +785,7 @@ pub fn GraphtronChart(
                     }
                 }
                 Action::SelectionChanged => overlay_tick += 1,
+                _ => {}
             }
         }
     };
@@ -768,18 +793,21 @@ pub fn GraphtronChart(
     let on_pointer_down = {
         let locals = locals.clone();
         move |evt: PointerEvent| {
-            if !interactive {
+            if !interactive || !accepts_chart_pointer(&evt, false) {
                 return;
             }
             let is_touch = evt.data().pointer_type() == "touch";
-            if !is_touch && !evt.data().is_primary() {
-                return;
-            }
             capture_pointer(&evt);
             let point = evt.element_coordinates();
             let (x, y) = (point.x, point.y);
+            let mode = drag_mode.unwrap_or(if evt.data().modifiers().shift() {
+                DragMode::Pan
+            } else {
+                DragMode::Zoom
+            });
             let became_pinch = {
                 let mut l = locals.borrow_mut();
+                l.drag_mode = mode;
                 if is_touch {
                     l.touch.down(evt.data().pointer_id(), (x, y));
                     if l.touch.multitouch {
@@ -820,15 +848,12 @@ pub fn GraphtronChart(
         let x_axis = x_axis.clone();
         let mut overlay_tick = overlay_tick;
         move |evt: PointerEvent| {
-            if !interactive {
+            if !interactive || !accepts_chart_pointer(&evt, true) {
                 return;
             }
             let point = evt.element_coordinates();
             let (x, y) = (point.x, point.y);
             let is_touch = evt.data().pointer_type() == "touch";
-            if !is_touch && !evt.data().is_primary() {
-                return;
-            }
             let actions = {
                 let mut l = locals.borrow_mut();
                 match l.layout {
@@ -880,21 +905,13 @@ pub fn GraphtronChart(
         let locals = locals.clone();
         let x_axis = x_axis.clone();
         move |evt: PointerEvent| {
-            if !interactive {
+            if !interactive || !accepts_chart_pointer(&evt, false) {
                 return;
             }
             let is_touch = evt.data().pointer_type() == "touch";
-            if !is_touch && !evt.data().is_primary() {
-                return;
-            }
             release_pointer(&evt);
             let point = evt.element_coordinates();
             let x = point.x;
-            let mode = drag_mode.unwrap_or(if evt.data().modifiers().shift() {
-                DragMode::Pan
-            } else {
-                DragMode::Zoom
-            });
             let actions = {
                 let mut l = locals.borrow_mut();
                 if is_touch {
@@ -903,6 +920,7 @@ pub fn GraphtronChart(
                     if was_multitouch {
                         vec![]
                     } else {
+                        let mode = l.drag_mode;
                         match l.layout {
                             Some(layout) => l.interact.on_mouse_up_with_min_span(
                                 x,
@@ -927,6 +945,7 @@ pub fn GraphtronChart(
                             let min_span =
                                 interaction_min_span(&x_axis, layout.x_scale.d0, layout.x_scale.d1)
                                     .unwrap_or(f64::INFINITY);
+                            let mode = l.drag_mode;
                             l.interact
                                 .on_mouse_up_with_min_span(x, &layout, mode, min_span)
                         }
@@ -1093,7 +1112,11 @@ pub fn GraphtronChart(
                 class: "graphtron-tooltip-inspector",
                 role: "group",
                 aria_label: "Frozen chart details",
-                onkeydown: move |evt| evt.stop_propagation(),
+                onkeydown: move |evt| {
+                    if evt.key() != dioxus::html::Key::Escape {
+                        evt.stop_propagation();
+                    }
+                },
                 style: "position: absolute; z-index: 2; right: 4px; top: 4px; max-width: calc(100% - 8px); max-height: calc(100% - 8px); overflow: auto; padding: 8px 10px; background: {inspector_bg}; color: {inspector_fg}; font: 11px monospace; pointer-events: auto;",
                 button {
                     r#type: "button",
@@ -1150,7 +1173,7 @@ pub fn GraphtronChart(
             class: "graphtron-chart-shell",
             style: "display: flex; flex-direction: {shell_direction}; align-items: stretch; gap: 4px; width: 100%;",
             if legend_before {
-                Legend { entries: legend_entries(), hidden, format: dom_legend_format }
+                Legend { entries: legend_entries.clone(), hidden, format: dom_legend_format }
             }
             div {
                 class: "{container_class}",
@@ -1180,7 +1203,7 @@ pub fn GraphtronChart(
                 }
             }
             if legend_after {
-                Legend { entries: legend_entries(), hidden, format: dom_legend_format }
+                Legend { entries: legend_entries, hidden, format: dom_legend_format }
             }
         }
     }
@@ -1246,6 +1269,9 @@ impl TouchPinch {
         layout: &graphtron::ChartLayout,
         min_span: f64,
     ) -> Vec<Action> {
+        if self.gesture.is_none() {
+            self.restart();
+        }
         let Some(gesture) = self.gesture else {
             return vec![];
         };
@@ -1278,6 +1304,44 @@ fn pinch_state(first: (f64, f64), second: (f64, f64)) -> Option<PinchState> {
         cx: (first.0 + second.0) / 2.0,
         cy: (first.1 + second.1) / 2.0,
     })
+}
+
+fn accepts_chart_pointer(evt: &PointerEvent, allow_move: bool) -> bool {
+    let data = evt.data();
+    if data.pointer_type() == "touch" {
+        return true;
+    }
+    if !data.is_primary() {
+        return false;
+    }
+    data.downcast::<web_sys::PointerEvent>()
+        .map(|event| event.button() == 0 || (allow_move && event.button() == -1))
+        .unwrap_or(true)
+}
+
+fn data_signature(data: &ChartData) -> Vec<String> {
+    let mut signature = vec![format!("{:?}", data.kind())];
+    let names: Vec<&str> = match data {
+        ChartData::Pie(items) | ChartData::Treemap(items) | ChartData::HostMap(items) => {
+            items.iter().map(|item| item.name.as_str()).collect()
+        }
+        ChartData::Lines(series)
+        | ChartData::Areas(series)
+        | ChartData::Bars(series)
+        | ChartData::Points(series)
+        | ChartData::Scatter(series)
+        | ChartData::Heatmap(series)
+        | ChartData::Step(series) => series.iter().map(|series| series.name.as_str()).collect(),
+        ChartData::Ohlc(series) => series.iter().map(|series| series.name.as_str()).collect(),
+        ChartData::Histogram(series) => series.iter().map(|series| series.name.as_str()).collect(),
+        ChartData::HBar(series) => series.iter().map(|series| series.name.as_str()).collect(),
+        ChartData::StateTimeline(series) => {
+            series.iter().map(|series| series.name.as_str()).collect()
+        }
+        ChartData::Band(series) => series.iter().map(|series| series.name.as_str()).collect(),
+    };
+    signature.extend(names.into_iter().map(str::to_owned));
+    signature
 }
 
 fn element_canvas(evt: &MountedEvent) -> Option<web_sys::HtmlCanvasElement> {
@@ -1826,7 +1890,8 @@ mod tests {
             ..histogram
         }]);
         assert_eq!(
-            legend_entries_for_data(&cumulative, LegendFormat::ValueOnly, graphtron::Unit::None)[0].0,
+            legend_entries_for_data(&cumulative, LegendFormat::ValueOnly, graphtron::Unit::None)[0]
+                .0,
             "5"
         );
     }
@@ -1969,6 +2034,27 @@ mod tests {
     }
 
     #[test]
+    fn touch_pinch_recovers_when_contacts_start_at_the_same_point() {
+        let layout = graphtron::ChartLayout::compute(400.0, 200.0, 0.0, 100.0, 0.0, 1.0);
+        let mut touch = TouchPinch::default();
+        touch.down(7, (100.0, 50.0));
+        touch.down(42, (100.0, 50.0));
+        touch.move_pointer(42, (150.0, 50.0));
+        assert!(
+            touch
+                .pinch_actions(&InteractState::Idle, &layout, 0.01)
+                .is_empty()
+        );
+        touch.move_pointer(42, (175.0, 50.0));
+        assert!(
+            touch
+                .pinch_actions(&InteractState::Idle, &layout, 0.01)
+                .iter()
+                .any(|action| matches!(action, Action::ZoomTo { .. }))
+        );
+    }
+
+    #[test]
     fn touch_cancel_removes_the_remaining_contact() {
         let mut touch = TouchPinch::default();
         touch.down(3, (10.0, 10.0));
@@ -1985,6 +2071,39 @@ mod tests {
         let hidden = HashSet::from([0, 2, 5]);
         assert_eq!(reconcile_hidden(&hidden, 3), HashSet::from([0, 2]));
         assert!(reconcile_hidden(&hidden, 0).is_empty());
+    }
+
+    #[test]
+    fn data_signature_detects_reordering_by_series_name() {
+        let first = ChartData::Lines(vec![
+            SeriesData {
+                name: "a".into(),
+                xs: vec![],
+                ys: vec![],
+                color: None,
+            },
+            SeriesData {
+                name: "b".into(),
+                xs: vec![],
+                ys: vec![],
+                color: None,
+            },
+        ]);
+        let second = ChartData::Lines(vec![
+            SeriesData {
+                name: "b".into(),
+                xs: vec![],
+                ys: vec![],
+                color: None,
+            },
+            SeriesData {
+                name: "a".into(),
+                xs: vec![],
+                ys: vec![],
+                color: None,
+            },
+        ]);
+        assert_ne!(data_signature(&first), data_signature(&second));
     }
 
     #[test]
